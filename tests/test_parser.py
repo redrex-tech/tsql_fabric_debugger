@@ -73,3 +73,91 @@ def test_while_has_no_else_chain():
     tokens = scan("WHILE @i < 3 BEGIN SET @i = @i + 1; END;")
     end, branches, is_loop = parse_conditional(tokens, 0, len(tokens))
     assert is_loop and len(branches) == 1
+
+
+# ---------------------------------------------------------------------------
+# review fixes (docs/REVIEW-2026-09-03.md)
+# ---------------------------------------------------------------------------
+from tsql_fabric_debugger.parser import scan_transaction_controls  # noqa: E402
+
+
+def test_else_without_semicolon_before_it():
+    sql = "IF @n = 1 SET @x = N'one' ELSE SET @x = N'other';"
+    tokens = scan(sql)
+    end, branches, is_loop = parse_conditional(tokens, 0, len(tokens))
+    assert len(branches) == 2
+
+    def span_text(span):
+        return " ".join(sql[tokens[span[0]]["s"]:tokens[span[1] - 1]["e"]].split())
+
+    assert span_text(branches[0]["body"]) == "SET @x = N'one'"     # ELSE not swallowed
+    assert branches[1]["cond"] is None
+    assert span_text(branches[1]["body"]) == "SET @x = N'other';"
+
+
+def test_copy_into_ends_the_if_condition():
+    sql = "IF @full = 1 COPY INTO stg.t FROM 'https://x' WITH (FILE_TYPE = 'CSV');"
+    tokens = scan(sql)
+    end, branches, _ = parse_conditional(tokens, 0, len(tokens))
+    def span_text(span):
+        return " ".join(sql[tokens[span[0]]["s"]:tokens[span[1] - 1]["e"]].split())
+    assert span_text(branches[0]["cond"]) == "@full = 1"
+    assert span_text(branches[0]["body"]).startswith("COPY INTO stg.t")
+
+
+def test_nested_try_steps_carry_the_full_catch_stack():
+    sql = """
+    CREATE PROCEDURE p AS
+    BEGIN
+        BEGIN TRY
+            SET @a = 1;
+            BEGIN TRY
+                SET @b = 1;
+            END TRY
+            BEGIN CATCH
+                SET @b = -1;
+            END CATCH
+            SET @c = 1;
+        END TRY
+        BEGIN CATCH
+            SET @a = -1;
+        END CATCH
+    END
+    """
+    tokens = scan(sql)
+    _, _, i_as = parse_params(sql, tokens, find_procedure(tokens))
+    i0, i1 = procedure_body(tokens, i_as)
+    ctx = {"catches": []}
+    steps = split_steps(sql, tokens, i0, i1, ctx)
+    assert [s["text"] for s in steps] == ["SET @a = 1", "SET @b = 1", "SET @c = 1"]
+    assert steps[0]["catch_ids"] == (0,)
+    assert steps[1]["catch_ids"] == (0, 1)     # inside BOTH trys
+    assert steps[2]["catch_ids"] == (0,)
+    assert len(ctx["catches"]) == 2
+
+
+def test_transaction_controls_including_dynamic_sql_and_exec():
+    sql = """
+    CREATE PROCEDURE p AS
+    BEGIN
+        SET @sql = N'UPDATE t SET a = 1; COMMIT;';
+        EXEC (@sql);
+        EXEC dbo.child_proc;
+    END
+    """
+    tokens = scan(sql)
+    _, _, i_as = parse_params(sql, tokens, find_procedure(tokens))
+    i0, i1 = procedure_body(tokens, i_as)
+    controls, exec_lines = scan_transaction_controls(sql, tokens, i0, i1)
+    assert any("string literal" in desc for desc, _ in controls)   # COMMIT inside N'...'
+    assert len(exec_lines) == 2
+
+
+def test_read_sql_file_common_encodings(tmp_path):
+    from tsql_fabric_debugger.parser import read_sql_file
+    text = "SELECT N'ação';"
+    for name, encoding in [("u8.sql", "utf-8"), ("u8b.sql", "utf-8-sig"),
+                           ("u16.sql", "utf-16"), ("cp.sql", "cp1252")]:
+        p = tmp_path / name
+        p.write_bytes(text.encode(encoding))
+        assert read_sql_file(p) == text

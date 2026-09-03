@@ -131,3 +131,120 @@ def test_intermediate_result_set_is_captured():
     rs = results[0]
     rows = rs.values.tolist() if hasattr(rs, "values") else rs["rows"]
     assert rows == [[1, "diag"]]
+
+
+PROC_NESTED = """
+CREATE PROCEDURE dbo.p_nested @a INT OUTPUT, @b INT OUTPUT, @c INT OUTPUT,
+                              @m NVARCHAR(200) OUTPUT AS
+BEGIN
+    BEGIN TRY
+        RAISERROR(N'outer boom', 16, 1);
+        BEGIN TRY
+            SET @b = 1;
+        END TRY
+        BEGIN CATCH
+            SET @m = N'inner';
+        END CATCH
+        SET @c = 1;
+    END TRY
+    BEGIN CATCH
+        SET @a = 99;
+    END CATCH
+END;
+"""
+
+
+def test_nested_try_fully_skipped_after_outer_catch():
+    dbg = TSQLDebugger(sql_text=PROC_NESTED, params={}, echo=lambda *_: None)
+    dbg.run_all()
+    env = dbg._env
+    dbg.close()
+    assert env["@A"] == 99          # outer CATCH ran
+    assert env["@B"] is None        # nested TRY skipped (real T-SQL skips it too)
+    assert env["@M"] is None        # nested CATCH never emulated
+    assert env["@C"] is None        # rest of outer TRY skipped
+
+
+PROC_CATCH_DECL = """
+CREATE PROCEDURE dbo.p_catchdecl @out NVARCHAR(400) OUTPUT AS
+BEGIN
+    BEGIN TRY
+        RAISERROR(N'boom', 16, 1);
+    END TRY
+    BEGIN CATCH
+        DECLARE @msg NVARCHAR(200) = ERROR_MESSAGE();
+        SET @out = CONCAT(@msg, N'|', ERROR_NUMBER(), N'|', ERROR_PROCEDURE());
+    END CATCH
+END;
+"""
+
+
+def test_declare_and_error_functions_inside_emulated_catch():
+    dbg = TSQLDebugger(sql_text=PROC_CATCH_DECL, params={}, echo=lambda *_: None)
+    dbg.run_all()
+    out = dbg._env["@OUT"]
+    dbg.close()
+    assert out == "boom|50000|dbo.p_catchdecl"
+
+
+PROC_ELSE = """
+CREATE PROCEDURE dbo.p_else @n INT, @x NVARCHAR(10) OUTPUT AS
+BEGIN
+    IF @n = 1 SET @x = N'one' ELSE SET @x = N'other';
+END;
+"""
+
+
+def test_step_into_runs_the_else_branch_without_semicolon():
+    dbg = TSQLDebugger(sql_text=PROC_ELSE, params={"@n": 2}, echo=lambda *_: None)
+    while not dbg._finished and dbg._pos < len(dbg._steps):
+        dbg.step_into()
+    x = dbg._env["@X"]
+    dbg.close()
+    assert x == "other"
+
+
+PROC_BARE_TRY = """
+CREATE PROCEDURE dbo.p_baretry @r INT OUTPUT AS
+BEGIN TRY
+    SET @r = 1;
+    RAISERROR(N'x', 16, 1);
+END TRY
+BEGIN CATCH
+    SET @r = -1;
+END CATCH
+"""
+
+
+def test_body_starting_at_begin_try_keeps_the_catch():
+    dbg = TSQLDebugger(sql_text=PROC_BARE_TRY, params={}, echo=lambda *_: None)
+    dbg.run_all()
+    r = dbg._env["@R"]
+    dbg.close()
+    assert r == -1
+
+
+PROC_RETURN_IN_CATCH = """
+CREATE PROCEDURE dbo.p_retc @r INT OUTPUT, @z INT OUTPUT AS
+BEGIN
+    BEGIN TRY
+        RAISERROR(N'x', 16, 1);
+    END TRY
+    BEGIN CATCH
+        SET @r = -1;
+        RETURN;
+    END CATCH
+    SET @z = 1;
+END;
+"""
+
+
+def test_return_inside_emulated_catch_ends_the_debug():
+    dbg = TSQLDebugger(sql_text=PROC_RETURN_IN_CATCH, params={}, echo=lambda *_: None)
+    dbg.run_all()
+    env = dbg._env
+    finished = dbg._finished
+    dbg.close()
+    assert env["@R"] == -1
+    assert env["@Z"] is None        # code after END CATCH never ran
+    assert finished

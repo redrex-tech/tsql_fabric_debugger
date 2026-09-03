@@ -26,6 +26,7 @@ STMT_START = {
     "RAISERROR", "PRINT", "THROW", "RETURN", "BREAK", "CONTINUE", "DECLARE",
     "BEGIN", "IF", "WHILE", "GOTO", "WAITFOR", "TRUNCATE", "DROP", "CREATE",
     "ALTER", "WITH", "COMMIT", "ROLLBACK", "SAVE",
+    "COPY", "GRANT", "DENY", "REVOKE", "DBCC",
 }
 
 # BEGIN followed by one of these does NOT open a block (BEGIN TRAN has no
@@ -140,20 +141,43 @@ def parse_params(sql, tokens, i):
 
 
 def procedure_body(tokens, i_after_as):
-    """Locate the body's BEGIN...END. Returns (i0, i1) — the inner token span."""
+    """Locate the procedure body after AS. Returns (i0, i1) — the token span.
+
+    Handles the three legal shapes: a BEGIN...END wrapper (common case), a
+    body that starts directly with BEGIN TRY (no outer wrapper — the CATCH
+    must NOT be dropped), and a bare statement list (`AS SET ...;`). Bare
+    bodies run until a level-0 GO or the end of the tokens.
+    """
+    n = len(tokens)
     i = i_after_as
-    while i < len(tokens) and not is_word(tokens[i], "BEGIN"):
-        i += 1
-    if i >= len(tokens):
-        raise ValueError("Procedure body (BEGIN...END) not found.")
+    if i >= n:
+        raise ValueError("Procedure body not found after AS.")
+    t = tokens[i]
+    is_wrapper = (is_word(t, "BEGIN") and is_block_begin(tokens, i, n)
+                  and not (i + 1 < n and tokens[i + 1]["k"] == "w"
+                           and tokens[i + 1]["u"] in ("TRY", "CATCH")))
+    if not is_wrapper:
+        depth = 0
+        j = i
+        while j < n:
+            tj = tokens[j]
+            if tj["k"] == "w":
+                if is_word(tj, "CASE") or is_block_begin(tokens, j, n):
+                    depth += 1
+                elif tj["u"] == "END":
+                    depth -= 1
+                elif tj["u"] == "GO" and depth <= 0:
+                    return i, j
+            j += 1
+        return i, n
     depth = 1
     j = i + 1
-    while j < len(tokens):
-        t = tokens[j]
-        if t["k"] == "w":
-            if is_word(t, "CASE") or is_block_begin(tokens, j, len(tokens)):
+    while j < n:
+        tj = tokens[j]
+        if tj["k"] == "w":
+            if is_word(tj, "CASE") or is_block_begin(tokens, j, n):
                 depth += 1
-            elif t["u"] == "END":
+            elif tj["u"] == "END":
                 depth -= 1
                 if depth == 0:
                     return i + 1, j
@@ -162,7 +186,13 @@ def procedure_body(tokens, i_after_as):
 
 
 def skip_stmt(tokens, i, i1):
-    """Advance past the level-0 ';' (parens and BEGIN/CASE/END tracked)."""
+    """Advance past the level-0 ';' (parens and BEGIN/CASE/END tracked).
+
+    Also stops right BEFORE a level-0 ELSE (returning its index): in
+    `IF x SET a = 1 ELSE SET a = 2` there is no ';' before the ELSE, and
+    without this stop the first branch body would swallow the whole ELSE.
+    A CASE's ELSE never triggers this — CASE raises the block counter.
+    """
     parens = block = 0
     while i < i1:
         t = tokens[i]
@@ -174,6 +204,8 @@ def skip_stmt(tokens, i, i1):
             block += 1
         elif is_word(t, "END"):
             block -= 1
+        elif is_word(t, "ELSE") and parens == 0 and block <= 0:
+            return i
         elif is_punct(t, ";") and parens == 0 and block <= 0:
             return i + 1
         i += 1
@@ -274,16 +306,20 @@ def find_try_catch_end(tokens, i, i1, suffix):
     raise ValueError(f"END {suffix} not found.")
 
 
-def split_steps(sql, tokens, i0, i1, ctx, catch_id=None):
+def split_steps(sql, tokens, i0, i1, ctx, catch_stack=()):
     """Slice a body span into executable steps.
 
     IF/WHILE blocks become single steps with their branch structure attached.
     Each BEGIN TRY is unwrapped and gets its own entry in ctx["catches"];
-    inner steps carry step["catch_id"] pointing at THEIR catch block — a
-    procedure with one TRY/CATCH per phase emulates the right catch in each
-    phase. RETURN becomes its own step (it ends the debug).
+    inner steps carry step["catch_id"] (their OWN catch) and
+    step["catch_ids"] (the full stack of enclosing TRYs, outermost first) —
+    the latter is what lets the engine skip the whole failed TRY, nested
+    TRYs included, before continuing after END CATCH. RETURN becomes its own
+    step (it ends the debug). ctx["span_ids"] de-duplicates catch
+    registration when the same TRY span is re-sliced (WHILE expansion).
     """
     step_list = []
+    span_ids = ctx.setdefault("span_ids", {})
     i = i0
     while i < i1:
         t = tokens[i]
@@ -292,18 +328,24 @@ def split_steps(sql, tokens, i0, i1, ctx, catch_id=None):
             continue
         if is_word(t, "BEGIN") and i + 1 < i1 and is_word(tokens[i + 1], "TRY"):
             try_end = find_try_catch_end(tokens, i + 2, i1, "TRY")
-            my_catch_id = len(ctx["catches"])
-            ctx["catches"].append([])
-            step_list.extend(split_steps(sql, tokens, i + 2, try_end, ctx, catch_id=my_catch_id))
+            span_key = (i + 2, try_end)
+            seen = span_key in span_ids
+            my_catch_id = span_ids[span_key] if seen else len(ctx["catches"])
+            if not seen:
+                span_ids[span_key] = my_catch_id
+                ctx["catches"].append([])
+            step_list.extend(split_steps(sql, tokens, i + 2, try_end, ctx,
+                                         catch_stack=catch_stack + (my_catch_id,)))
             i = try_end + 2  # skip END TRY
             if i + 1 < i1 and is_word(tokens[i], "BEGIN") and is_word(tokens[i + 1], "CATCH"):
                 catch_end = find_try_catch_end(tokens, i + 2, i1, "CATCH")
-                ctx["catches"][my_catch_id] = split_steps(sql, tokens, i + 2, catch_end, ctx)
+                if not seen:
+                    ctx["catches"][my_catch_id] = split_steps(sql, tokens, i + 2, catch_end, ctx)
                 i = catch_end + 2
             continue
         if t["k"] == "w" and t["u"] in ("IF", "WHILE"):
             end, branches, is_loop = parse_conditional(tokens, i, i1)
-            step = new_step(sql, tokens, i, end, t["u"].lower() + "_block", catch_id)
+            step = new_step(sql, tokens, i, end, t["u"].lower() + "_block", catch_stack)
             step["branches"] = branches
             step["is_loop"] = is_loop
             step_list.append(step)
@@ -311,21 +353,24 @@ def split_steps(sql, tokens, i0, i1, ctx, catch_id=None):
             continue
         if is_word(t, "DECLARE"):
             end = skip_stmt(tokens, i, i1)
-            step_list.append(new_step(sql, tokens, i, end, "declare", catch_id))
+            step_list.append(new_step(sql, tokens, i, end, "declare", catch_stack))
             i = end
             continue
         if is_word(t, "RETURN"):
             end = skip_stmt(tokens, i, i1)
-            step_list.append(new_step(sql, tokens, i, end, "return", catch_id))
+            step_list.append(new_step(sql, tokens, i, end, "return", catch_stack))
             i = end
             continue
         end = skip_stmt(tokens, i, i1)
-        step_list.append(new_step(sql, tokens, i, end, "stmt", catch_id))
+        if end == i:          # defensive: a stray level-0 ELSE must not loop forever
+            i += 1
+            continue
+        step_list.append(new_step(sql, tokens, i, end, "stmt", catch_stack))
         i = end
     return step_list
 
 
-def new_step(sql, tokens, i_start, i_end, kind, catch_id=None):
+def new_step(sql, tokens, i_start, i_end, kind, catch_stack=()):
     j = i_end - 1
     while j > i_start and is_punct(tokens[j], ";"):
         j -= 1
@@ -337,32 +382,49 @@ def new_step(sql, tokens, i_start, i_end, kind, catch_id=None):
         "ti": (i_start, i_end),   # token span, for step_into and DECLARE scans
         "text": sql[s:e],
         "line": sql.count("\n", 0, s) + 1,
-        "catch_id": catch_id,     # index of this step's CATCH block (None = outside TRY)
-        "try": catch_id is not None,
+        "catch_id": catch_stack[-1] if catch_stack else None,   # this step's own CATCH
+        "catch_ids": catch_stack,                               # every enclosing TRY
+        "try": bool(catch_stack),
         "depth": 0,
     }
 
 
+_TXN_IN_STRING = re.compile(r"\b(COMMIT|ROLLBACK|BEGIN\s+TRAN(?:SACTION)?|SAVE\s+TRAN(?:SACTION)?)\b",
+                            re.IGNORECASE)
+
+
 def scan_transaction_controls(sql, tokens, i0, i1):
-    """Locate COMMIT/ROLLBACK/BEGIN TRAN/SAVE TRAN in the procedure body.
+    """Locate transaction control in the procedure body.
 
     Procedures that manage their own transaction defeat the debugger's
-    rollback-by-default guarantee — the caller uses this to warn.
-    Returns [(keyword, line)].
+    rollback-by-default guarantee — the caller uses this to warn. Three
+    sources are inspected: literal COMMIT/ROLLBACK/BEGIN TRAN/SAVE TRAN
+    tokens; the same keywords INSIDE string literals (dynamic SQL executed
+    via EXEC/sp_executesql); and EXEC/EXECUTE calls, whose child effects the
+    parser cannot see at all. Returns (controls, exec_lines) where controls
+    is [(description, line)] and exec_lines is [line, ...].
     """
-    found = []
+    controls, exec_lines = [], []
     i = i0
     while i < i1:
         t = tokens[i]
         if t["k"] == "w":
             nxt = tokens[i + 1] if i + 1 < i1 else None
+            line = sql.count("\n", 0, t["s"]) + 1
             if t["u"] in ("COMMIT", "ROLLBACK"):
-                found.append((t["u"], sql.count("\n", 0, t["s"]) + 1))
+                controls.append((t["u"], line))
             elif (t["u"] in ("BEGIN", "SAVE") and nxt is not None
                   and nxt["k"] == "w" and nxt["u"] in ("TRAN", "TRANSACTION")):
-                found.append((f"{t['u']} {nxt['u']}", sql.count("\n", 0, t["s"]) + 1))
+                controls.append((f"{t['u']} {nxt['u']}", line))
+            elif t["u"] in ("EXEC", "EXECUTE"):
+                exec_lines.append(line)
+        elif t["k"] == "str":
+            m = _TXN_IN_STRING.search(sql[t["s"]:t["e"]])
+            if m:
+                line = sql.count("\n", 0, t["s"]) + 1
+                controls.append((f"{m.group(1).upper()} inside a string literal", line))
         i += 1
-    return found
+    return controls, exec_lines
 
 
 def scan_declares(sql, tokens, i0, i1):
@@ -457,11 +519,17 @@ def eval_literal(expr):
     return False, None
 
 
+_ERROR_FUNCS = {"ERROR_MESSAGE", "ERROR_NUMBER", "ERROR_SEVERITY",
+                "ERROR_STATE", "ERROR_LINE", "ERROR_PROCEDURE"}
+
+
 def rewrite(text, error_msg, has_rowcount_env):
-    """Replace @@ROWCOUNT and ERROR_MESSAGE() with '?' parameters.
+    """Replace @@ROWCOUNT and the ERROR_*() family with '?' parameters.
 
     Preserves cross-batch semantics: @@ROWCOUNT gets the previous step's
-    value and ERROR_MESSAGE() gets the error captured by Python.
+    value, and — in an emulated CATCH — ERROR_MESSAGE()/ERROR_NUMBER()/
+    ERROR_LINE()/ERROR_PROCEDURE()/ERROR_SEVERITY()/ERROR_STATE() get the
+    values captured by Python (error_msg not None marks CATCH context).
     Returns (text, markers).
     """
     tokens = scan(text)
@@ -471,9 +539,9 @@ def rewrite(text, error_msg, has_rowcount_env):
         t = tokens[i]
         if t["k"] == "w" and t["u"] == "@@ROWCOUNT" and has_rowcount_env:
             swaps.append((t["s"], t["e"], "@@ROWCOUNT"))
-        elif (t["k"] == "w" and t["u"] == "ERROR_MESSAGE" and error_msg is not None
+        elif (t["k"] == "w" and t["u"] in _ERROR_FUNCS and error_msg is not None
               and i + 2 < len(tokens) and is_punct(tokens[i + 1], "(") and is_punct(tokens[i + 2], ")")):
-            swaps.append((t["s"], tokens[i + 2]["e"], "ERROR_MESSAGE"))
+            swaps.append((t["s"], tokens[i + 2]["e"], t["u"]))
             i += 3
             continue
         i += 1
@@ -481,3 +549,19 @@ def rewrite(text, error_msg, has_rowcount_env):
     for s, e, _ in reversed(swaps):
         text = text[:s] + "?" + text[e:]
     return text, markers
+
+
+def read_sql_file(path) -> str:
+    """Read a .sql file tolerating the encodings found in the wild.
+
+    UTF-8 (with or without BOM) first; UTF-16 only when a BOM says so (SSMS
+    default); cp1252 as the last resort for legacy files with accents.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")

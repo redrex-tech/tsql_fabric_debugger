@@ -10,10 +10,11 @@ session:
     <original statement, untouched>;
     SELECT '__hcap__', @@ROWCOUNT, @a, @b, ...;   -- capture of the new state
 
-Python keeps the "stack frame" between steps. @@ROWCOUNT and ERROR_MESSAGE()
-are rewritten as parameters to preserve cross-batch semantics, and the
+Python keeps the "stack frame" between steps. @@ROWCOUNT and the ERROR_*()
+family are rewritten as parameters to preserve cross-batch semantics, and the
 procedure's BEGIN CATCH is emulated when a step inside its TRY fails —
-including the T-SQL rule that execution continues after END CATCH.
+including the T-SQL rules that execution continues after END CATCH and that
+the whole failed TRY (nested TRYs included) is skipped.
 
 Everything runs inside a transaction with ROLLBACK at the end by default —
 nothing persists in the Warehouse unless close(commit=True).
@@ -29,6 +30,7 @@ from .parser import (
     find_procedure,
     parse_params,
     procedure_body,
+    read_sql_file,
     rewrite,
     scan_declares,
     scan_transaction_controls,
@@ -56,16 +58,30 @@ class TSQLDebugger:
     untouched), params (test values, e.g. {"@year": 2015}), server and
     database (or the FABRIC_TSQL_SERVER/FABRIC_TSQL_DATABASE env vars).
     echo redirects console output (default: print).
+
+    Prefer the context-manager form — it guarantees ROLLBACK + close even on
+    exceptions, so no orphan session is left holding locks on the warehouse:
+
+        with TSQLDebugger("proc.sql", params={...}) as dbg:
+            dbg.run_all()
+
+    Notes: instances are NOT thread-safe (one pyodbc session, one shared
+    environment). Step NUMBERS shown by list_steps() change after a
+    step_into() expansion — re-list before using jump_to()/run_until().
+    show_detail()/last_results() take LOG entry numbers, which differ from
+    step numbers (the log also records cond/params/catch entries).
     """
 
-    def __init__(self, sql_file=None, sql_text=None, params=None,
-                 server=None, database=None, autocommit=False,
-                 log_level="simple", stop_on_error=True,
-                 preview_chars=500, max_loop_iterations=1000,
-                 step_timeout=None, max_result_rows=50, echo=print):
+    def __init__(self, sql_file: str | None = None, sql_text: str | None = None,
+                 params: dict | None = None,
+                 server: str | None = None, database: str | None = None, autocommit: bool = False,
+                 log_level: str = "simple", stop_on_error: bool = True,
+                 preview_chars: int = 500, max_loop_iterations: int = 1000,
+                 step_timeout: int | None = None, max_result_rows: int = 50, echo=print):
         if sql_text is None:
-            with open(sql_file, encoding="utf-8") as f:
-                sql_text = f.read()
+            if sql_file is None:
+                raise ValueError("Provide sql_file or sql_text.")
+            sql_text = read_sql_file(sql_file)
         self._sql = sql_text
         self._server = server
         self._database = database
@@ -80,9 +96,13 @@ class TSQLDebugger:
         self._conn = None
         self._cursor = None
         self._log = []
-        self._details = {}   # step -> {"text", "batch", "resultsets", "captured"}
+        self._details = {}   # log step -> {"text","batch","resultsets","captured","changed","raw_error"}
         self._error_msg = None
+        self._error_number = None
+        self._error_line = None
         self._finished = False
+        self._rolled_back = False
+        self._warned_post_rollback = False
         self._pos = 0
 
         tokens = scan(sql_text)
@@ -93,18 +113,28 @@ class TSQLDebugger:
         self.proc_name, self._param_defs, i_as = parse_params(sql_text, tokens, i_proc)
         i0, i1 = procedure_body(tokens, i_as)
 
-        ctx = {"catches": []}
+        ctx = {"catches": [], "span_ids": {}}
         self._steps = split_steps(sql_text, tokens, i0, i1, ctx)
-        self._catches = ctx["catches"]   # one CATCH block per TRY, in body order
+        self._catches = ctx["catches"]     # one CATCH block per TRY, in body order
+        self._span_ids = ctx["span_ids"]   # keeps catch registration idempotent on re-slicing
 
         # does the procedure manage its own transaction? The debugger's
-        # rollback-by-default cannot undo whatever an inner COMMIT persists
-        controls = scan_transaction_controls(sql_text, tokens, i0, i1)
-        if controls and not autocommit:
+        # rollback-by-default cannot undo whatever an inner COMMIT persists —
+        # including one hidden inside dynamic SQL or a child procedure
+        controls, exec_lines = scan_transaction_controls(sql_text, tokens, i0, i1)
+        if controls:
             spots = ", ".join(f"{keyword} (line {line})" for keyword, line in controls)
             self._echo(f"[WARNING] the procedure manages its own transaction: {spots}. "
                        "An inner COMMIT persists data EVEN WITH the debugger's default "
                        "ROLLBACK — review before running those steps.")
+        if exec_lines and not autocommit:
+            shown = ", ".join(str(line) for line in exec_lines[:8])
+            more = f" (+{len(exec_lines) - 8} more)" if len(exec_lines) > 8 else ""
+            self._echo(f"[NOTICE] EXEC call(s) at line(s) {shown}{more}: child procedures "
+                       "or dynamic SQL may contain transaction control the parser cannot see.")
+        if autocommit:
+            self._echo("[WARNING] autocommit=True: every step persists immediately — "
+                       "close() will NOT undo anything.")
 
         # variable registry: parameters + EVERY DECLARE in the body, including
         # inside IF/WHILE blocks and the CATCH — a variable declared inside a
@@ -142,6 +172,14 @@ class TSQLDebugger:
                    f"| {sum(len(c) for c in self._catches)} step(s) in {len(self._catches)} "
                    f"CATCH block(s) | {len(self._vars)} variables")
 
+    # -- context manager ----------------------------------------------------
+    def __enter__(self) -> "TSQLDebugger":
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close(commit=False)
+        return False
+
     # -- infrastructure -----------------------------------------------------
     def _register_var(self, name, sql_type):
         key = name.upper()
@@ -161,9 +199,25 @@ class TSQLDebugger:
                 self._conn.timeout = self._step_timeout   # per-command timeout, in seconds
             self._cursor = self._conn.cursor()
             if self._pending_defaults:
-                assigns = ", ".join(f"{n} = ({d})" for n, d in self._pending_defaults)
+                pending, self._pending_defaults = self._pending_defaults, []
+                assigns = ", ".join(f"{n} = ({d})" for n, d in pending)
                 self._exec_batch(f"SELECT {assigns}", [], f"defaults: {assigns}", "params", 0)
         return self._cursor
+
+    def _safe_rollback(self, announce=False):
+        """Rollback that never raises; reports a dead session instead of hiding it."""
+        if self._autocommit or self._conn is None:
+            return
+        try:
+            self._conn.rollback()
+            self._rolled_back = True
+            if announce:
+                self._echo("[TRANSACTION] error inside a Fabric transaction — ROLLBACK "
+                           "executed (data effects of previous steps undone; captured "
+                           "VARIABLES keep their values).")
+        except Exception:
+            self._echo("[TRANSACTION] rollback FAILED — the session is likely dead; "
+                       "close() and start a new debugger.")
 
     def _build_batch(self, stmt_text, stmt_binds, exclude=frozenset(), extra_capture=None):
         """Build the state-preserving batch: DECLARE + re-injection + statement + capture.
@@ -196,9 +250,18 @@ class TSQLDebugger:
         return "\n".join(parts), values + stmt_binds
 
     def _exec_batch(self, stmt_text, stmt_binds, text, kind, line,
-                    exclude=frozenset(), extra_capture=None, update_rowcount=True):
+                    exclude=frozenset(), extra_capture=None, update_rowcount=True,
+                    session_mode=False):
         cur = self._ensure_connection()
-        batch, values = self._build_batch(stmt_text, stmt_binds, exclude, extra_capture)
+        if session_mode:
+            # session SET options (NOCOUNT, XACT_ABORT, ...) must run in an
+            # UNPARAMETERIZED batch: pyodbc routes parameterized batches
+            # through sp_prepexec, where SET options revert at batch end
+            batch = (stmt_text + "\n;\n"
+                     + f"SELECT '{_SENTINEL}' AS [{_SENTINEL}], @@ROWCOUNT AS [__rowcount__];")
+            values = list(stmt_binds)
+        else:
+            batch, values = self._build_batch(stmt_text, stmt_binds, exclude, extra_capture)
         started = time.time()
         changed = {}
         resultsets = []
@@ -242,39 +305,51 @@ class TSQLDebugger:
                     })
                 if not cur.nextset():
                     break
+            rows_affected = self._env.get("@@ROWCOUNT") if (captured and update_rowcount) else None
             entry = self._record(kind, line, "SUCCESS", text, started, changed, None,
-                                 batch=batch, resultsets=resultsets, captured=captured)
+                                 batch=batch, resultsets=resultsets, captured=captured,
+                                 rows_affected=rows_affected)
+        except KeyboardInterrupt:
+            # pyodbc does not abort the server-side statement on SIGINT —
+            # cancel it explicitly, then leave the session in a clean state
+            try:
+                cur.cancel()
+            except Exception:
+                pass
+            self._echo("[INTERRUPTED] step canceled on the server; rolling back.")
+            self._safe_rollback()
+            raise
         except Exception as exc:
-            self._error_msg = _extract_sql_error(exc)
-            entry = self._record(kind, line, "ERROR", text, started, {}, self._error_msg, batch=batch)
-            if not self._autocommit:
-                try:
-                    self._conn.rollback()
-                    self._echo("[TRANSACTION] error inside a Fabric transaction — ROLLBACK "
-                               "executed (data effects of previous steps undone; captured "
-                               "VARIABLES keep their values).")
-                except Exception:
-                    pass
+            raw = str(exc)
+            self._error_msg, self._error_number = _parse_sql_error(raw)
+            self._error_line = line
+            entry = self._record(kind, line, "ERROR", text, started, {}, self._error_msg,
+                                 batch=batch, resultsets=resultsets, captured=False,
+                                 rows_affected=None, raw_error=raw)
+            self._safe_rollback(announce=not self._autocommit)
             raise
         return entry
 
     def _record(self, kind, line, status, text, started, changed, error,
-                batch=None, resultsets=None, captured=True):
+                batch=None, resultsets=None, captured=True, rows_affected=None,
+                raw_error=None):
         entry = {
             "step": len(self._log) + 1,
             "line": line,
             "kind": kind,
             "status": status,
-            "rows_affected": self._env.get("@@ROWCOUNT"),
+            "rows_affected": rows_affected,
             "duration_s": round(time.time() - started, 3),
             "command": " ".join(text[:self._preview_chars].split()),
             "changed_vars": "; ".join(f"{k}={_shorten(v)}" for k, v in changed.items()) or None,
             "result_sets": len(resultsets) if resultsets else 0,
+            "post_rollback": self._rolled_back,
             "error": error,
         }
         self._log.append(entry)
         self._details[entry["step"]] = {"text": text, "batch": batch,
-                                        "resultsets": resultsets or [], "captured": captured}
+                                        "resultsets": resultsets or [], "captured": captured,
+                                        "changed": dict(changed), "raw_error": raw_error}
         symbol = {"SUCCESS": "ok", "REGISTERED": "reg"}.get(status, "ERR")
         full = self._log_level == "full"
         if full:
@@ -293,6 +368,8 @@ class TSQLDebugger:
             if full:
                 for r in rs["rows"][:10]:
                     self._echo(f"      ~~   {r}")
+                if len(rs["rows"]) > 10:
+                    self._echo(f"      ~~   ... +{len(rs['rows']) - 10} more row(s) — last_results()")
         if error:
             self._echo(f"      !! file line {line} | {error}")
             if full and batch:
@@ -301,12 +378,169 @@ class TSQLDebugger:
                     self._echo(f"      |  {ln}")
         return entry
 
+    # -- step execution core ------------------------------------------------
+    def _is_session_set(self, step):
+        """SET of a session option (NOCOUNT, XACT_ABORT, ISOLATION LEVEL...)."""
+        if step["kind"] != "stmt":
+            return False
+        toks = scan(step["text"])
+        return (len(toks) >= 2 and is_word(toks[0], "SET")
+                and toks[1]["k"] == "w" and not toks[1]["u"].startswith("@"))
+
+    def _bind_for(self, marker, fallback_line=None):
+        if marker == "@@ROWCOUNT":
+            return self._env.get("@@ROWCOUNT", 0)
+        return {
+            "ERROR_MESSAGE": self._error_msg,
+            "ERROR_NUMBER": self._error_number,
+            "ERROR_SEVERITY": 16,   # the driver does not expose it; RAISERROR-compatible default
+            "ERROR_STATE": 1,       # idem
+            "ERROR_LINE": self._error_line,
+            "ERROR_PROCEDURE": self.proc_name,
+        }[marker]
+
+    def _execute_step(self, step, prefix=""):
+        """Dispatch one step by kind. Raises on SQL errors.
+
+        Returns (log_entry, returned) — returned=True when the step was (or
+        contained) a RETURN, i.e. the procedure execution ends here.
+        """
+        text_for_log = prefix + step["text"]
+        kind = step["kind"]
+        if kind == "declare":
+            declares = step.get("declares")
+            if declares is None:
+                declares = extract_declares(step["text"])
+            inits = [(n, e) for n, t, e in declares
+                     if e and not t.strip().upper().startswith("TABLE")]
+            if not inits:
+                started = time.time()
+                return self._record("declare", step["line"], "REGISTERED",
+                                    text_for_log, started, {}, None), False
+            stmt = "SELECT " + ", ".join(f"{n} = ({e})" for n, e in inits)
+            # a DECLARE inside a CATCH may initialize from ERROR_MESSAGE() etc.
+            stmt, markers = rewrite(stmt, self._error_msg,
+                                    self._env.get("@@ROWCOUNT") is not None)
+            binds = [self._bind_for(m) for m in markers]
+            return self._exec_batch(stmt, binds, text_for_log, "declare", step["line"]), False
+        if kind == "return":
+            # RETURN ends the procedure — the debug stops here, just like
+            # the real execution would (nothing is sent to the server)
+            started = time.time()
+            entry = self._record("return", step["line"], "SUCCESS",
+                                 text_for_log, started, {}, None)
+            self._echo("      RETURN — procedure execution finished.")
+            return entry, True
+        # atomically executed blocks may contain their own DECLARE:
+        # those leave the batch's initial DECLARE to avoid duplication
+        exclude = frozenset()
+        if kind.endswith("_block"):
+            ti0, ti1 = step["ti"]
+            exclude = frozenset(n.upper() for n, _, _ in
+                                scan_declares(self._sql, self._tokens, ti0, ti1))
+        text, markers = rewrite(step["text"], self._error_msg,
+                                self._env.get("@@ROWCOUNT") is not None)
+        binds = [self._bind_for(m) for m in markers]
+        entry = self._exec_batch(text, binds, text_for_log, kind, step["line"],
+                                 exclude=exclude,
+                                 session_mode=self._is_session_set(step))
+        # a RETURN inside an atomic block ends the batch before the capture:
+        # missing sentinel + RETURN in the text = the procedure returned
+        returned = (not self._details[entry["step"]]["captured"]
+                    and any(is_word(t, "RETURN") for t in scan(step["text"])))
+        if returned:
+            self._echo("      RETURN executed inside the block — execution finished "
+                       "(variables assigned in this step were not captured).")
+        return entry, returned
+
+    def _run_one(self, step, emulate_catch, finalize):
+        log_before = len(self._log)
+        try:
+            entry, returned = self._execute_step(step)
+            if returned and finalize:
+                self._finished = True
+            return entry
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if len(self._log) == log_before:
+                # nothing was recorded: infrastructure or internal failure —
+                # never swallow it (a swallowed bug looks like a clean finish)
+                self._echo(f"[FATAL] failure outside SQL execution: {exc}")
+                raise
+            error_entry = self._log[log_before]
+            self._handle_step_error(step, emulate_catch, finalize)
+            return error_entry
+
+    def _handle_step_error(self, step, emulate_catch, finalize):
+        if step["kind"].endswith("_block"):
+            self._echo("      Hint: to pinpoint the exact statement inside the block, "
+                       "use jump_to(n) + step_into().")
+        catch_id = step.get("catch_id")
+        catch_steps = (self._catches[catch_id]
+                       if emulate_catch and catch_id is not None
+                       and catch_id < len(self._catches) else [])
+        if catch_steps:
+            self._echo(f"[CATCH] error inside TRY #{catch_id + 1} — emulating "
+                       f"{len(catch_steps)} step(s) of its CATCH block.")
+            ok = self._emulate_catch(catch_steps)
+            self._error_msg = self._error_number = self._error_line = None
+            if not finalize:
+                return
+            if self._finished:      # RETURN or THROW inside the CATCH
+                return
+            if ok:
+                # T-SQL semantics: after the CATCH handles the error, execution
+                # CONTINUES after END CATCH — skip everything still inside the
+                # failed TRY, nested TRY blocks included (catch_ids stack)
+                skipped = 0
+                while (self._pos < len(self._steps)
+                       and catch_id in self._steps[self._pos].get("catch_ids", ())):
+                    self._pos += 1
+                    skipped += 1
+                if skipped:
+                    self._echo(f"[CATCH] {skipped} remaining step(s) of TRY #{catch_id + 1} "
+                               "skipped; the debug continues after END CATCH.")
+                if self._rolled_back and not self._warned_post_rollback:
+                    self._warned_post_rollback = True
+                    self._echo("[TRANSACTION] note: data effects before the error were rolled "
+                               "back — following steps run against the post-rollback state "
+                               "and may diverge from a real execution.")
+            else:
+                self._finished = True
+        elif finalize:
+            self._finished = self._stop_on_error
+
+    def _emulate_catch(self, catch_steps):
+        """Run the CATCH steps. Returns False if the CATCH itself failed."""
+        for step in catch_steps:
+            first = scan(step["text"])
+            if first and is_word(first[0], "THROW"):
+                started = time.time()
+                self._record("throw", step["line"], "SUCCESS",
+                             "[CATCH] " + step["text"], started, {}, None)
+                self._echo("      THROW — the original error is re-raised; procedure aborts.")
+                self._finished = True
+                return True
+            try:
+                _, returned = self._execute_step(step, prefix="[CATCH] ")
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                return False
+            if returned:
+                self._echo("      RETURN inside the CATCH — procedure execution finished.")
+                self._finished = True
+                return True
+        return True
+
     # -- interactive API ----------------------------------------------------
-    def list_steps(self):
+    def list_steps(self) -> None:
         """List the numbered steps without executing anything.
 
         The '*' marks the current cursor; indentation shows sub-steps created
-        by step_into() inside IF/WHILE blocks.
+        by step_into() inside IF/WHILE blocks. Numbers CHANGE after a
+        step_into() expansion — re-list before jump_to()/run_until().
         """
         for n, step in enumerate(self._steps, start=1):
             mark = "*" if n == self._pos + 1 else " "
@@ -318,7 +552,7 @@ class TSQLDebugger:
             self._echo(f" ... + {total_catch} step(s) in {len(self._catches)} CATCH block(s) "
                        "(emulated after an error in the matching TRY)")
 
-    def step(self):
+    def step(self) -> dict | None:
         """Run the next step and advance the cursor ("step over": whole IF/WHILE)."""
         if self._finished or self._pos >= len(self._steps):
             self._echo("Debug finished — all steps executed (or CATCH emulated).")
@@ -327,7 +561,7 @@ class TSQLDebugger:
         self._pos += 1
         return self._run_one(current, emulate_catch=True, finalize=True)
 
-    def step_into(self):
+    def step_into(self) -> object:
         """Step into the next step when it is an IF/WHILE block.
 
         Instead of running the whole block at once (as step() does), it
@@ -348,25 +582,43 @@ class TSQLDebugger:
             self._echo("[WARNING] WHILE with BREAK/CONTINUE is not supported by step_into — "
                        "running the whole block (step over).")
             return self.step()
-        if step["is_loop"]:
-            return self._expand_while(step)
-        return self._expand_if(step)
+        log_before = len(self._log)
+        try:
+            if step["is_loop"]:
+                return self._expand_while(step)
+            return self._expand_if(step)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if len(self._log) == log_before or self._log[-1]["status"] != "ERROR":
+                self._echo(f"[FATAL] failure outside SQL execution: {exc}")
+                raise
+            # the condition evaluation failed — same treatment the block
+            # would get failing under step(): emulate its CATCH and move on
+            if self._pos < len(self._steps) and self._steps[self._pos] is step:
+                self._pos += 1
+            self._handle_step_error(step, emulate_catch=True, finalize=True)
+            return self._log[log_before]
 
-    def run_step(self, n, emulate_catch=False):
+    def run_step(self, n: int, emulate_catch: bool = False) -> dict | None:
         """Run ONLY step n (1-based), with the current variable state.
 
-        Does not move the sequential cursor. If the step depends on variables
-        from earlier steps that never ran, build the state first with set_var().
+        Does not move the sequential cursor and — unlike step() — does NOT
+        emulate the CATCH on failure unless emulate_catch=True. If the step
+        depends on variables from earlier steps that never ran, build the
+        state first with set_var().
         """
         if not 1 <= n <= len(self._steps):
             raise ValueError(f"Step {n} outside range 1..{len(self._steps)}.")
         return self._run_one(self._steps[n - 1], emulate_catch=emulate_catch, finalize=False)
 
-    def jump_to(self, n):
+    def jump_to(self, n: int) -> None:
         """Place the cursor at step n (1-based) WITHOUT running earlier steps.
 
         Careful: variables assigned by the skipped steps keep their current
-        environment values (use set_var() to build them by hand).
+        environment values (use set_var() to build them by hand), and step
+        numbers change after a step_into() expansion — re-run list_steps()
+        to get current numbers.
         """
         if not 1 <= n <= len(self._steps):
             raise ValueError(f"Step {n} outside range 1..{len(self._steps)}.")
@@ -377,26 +629,31 @@ class TSQLDebugger:
             self._echo(f"[WARNING] {skipped} step(s) skipped — their variable assignments did NOT run.")
         self._echo(f"Cursor at step {n}: " + " ".join(self._steps[n - 1]['text'][:90].split()))
 
-    def set_var(self, name, value):
+    def set_var(self, name: str, value: object) -> None:
         """Manually assign an environment variable (e.g. before run_step)."""
         key = (name if name.startswith("@") else "@" + name).upper()
         if key != "@@ROWCOUNT" and key not in self._vars:
             known = ", ".join(self._vars[k]["name"] for k in self._vars)
             raise ValueError(f"Variable {name} does not exist in the procedure. Known: {known}")
+        if key in self._vars and self._vars[key]["table"]:
+            raise ValueError(f"{name} is a table variable — its content cannot be set "
+                             "from the debugger.")
         self._env[key] = value
         self._echo(f"{name} = {_shorten(value)}")
 
-    def set_log_level(self, level):
+    def set_log_level(self, level: str) -> None:
         """Change the log level mid-debug: 'simple' or 'full'."""
         if level.lower() not in ("simple", "full"):
             raise ValueError("Use 'simple' or 'full'.")
         self._log_level = level.lower()
         self._echo(f"Log level: {self._log_level}")
 
-    def show_detail(self, step_no=None):
-        """Show one logged step in full: command, error and the executed SQL batch.
+    def show_detail(self, step_no: int | None = None) -> dict | None:
+        """Show one logged step in full: command, changed variables (untruncated),
+        error (clean and raw), result sets and the executed SQL batch.
 
-        Without an argument, shows the last step (handy right after an error).
+        step_no is a LOG entry number (the [ n] on the console), not a step
+        number. Without an argument, shows the last entry.
         """
         if not self._log:
             self._echo("No step executed yet.")
@@ -407,10 +664,13 @@ class TSQLDebugger:
                    f"{entry['kind']} | {entry['status']} | {entry['duration_s']}s")
         self._echo("-- command (original file):")
         self._echo(detail.get("text") or entry["command"])
-        if entry["changed_vars"]:
-            self._echo(f"-- changed variables: {entry['changed_vars']}")
+        for k, v in (detail.get("changed") or {}).items():
+            self._echo(f"-- changed: {k} = {v!r}")
         if entry["error"]:
             self._echo(f"-- error: {entry['error']}")
+            raw = detail.get("raw_error")
+            if raw and raw.strip() != entry["error"]:
+                self._echo(f"-- raw driver error: {raw}")
         for n, rs in enumerate(detail.get("resultsets") or [], start=1):
             extra = " (truncated)" if rs["truncated"] else ""
             self._echo(f"-- result set {n}{extra}: {rs['columns']}")
@@ -421,11 +681,12 @@ class TSQLDebugger:
             self._echo(detail["batch"])
         return entry
 
-    def last_results(self, step_no=None):
-        """Result sets the procedure itself produced in one step.
+    def last_results(self, step_no: int | None = None) -> list:
+        """Result sets the procedure itself produced in one logged entry.
 
-        Without an argument, uses the last executed step. Returns a list of
-        DataFrames (or of {"columns","rows","truncated"} dicts without pandas).
+        Without an argument, uses the last executed entry. Returns a list of
+        DataFrames (df.attrs["truncated"] marks a cut at max_result_rows), or
+        of {"columns","rows","truncated"} dicts without pandas.
         """
         if not self._log:
             return []
@@ -433,99 +694,14 @@ class TSQLDebugger:
         resultsets = self._details.get(entry["step"], {}).get("resultsets") or []
         try:
             import pandas as pd
-            return [pd.DataFrame(rs["rows"], columns=rs["columns"]) for rs in resultsets]
         except ImportError:
             return resultsets
-
-    def _run_one(self, step, emulate_catch, finalize):
-        try:
-            if step["kind"] == "declare":
-                declares = step.get("declares")
-                if declares is None:
-                    declares = extract_declares(step["text"])
-                inits = [(n, e) for n, t, e in declares
-                         if e and not t.strip().upper().startswith("TABLE")]
-                if not inits:
-                    started = time.time()
-                    return self._record("declare", step["line"], "REGISTERED",
-                                        step["text"], started, {}, None)
-                stmt = "SELECT " + ", ".join(f"{n} = ({e})" for n, e in inits)
-                return self._exec_batch(stmt, [], step["text"], "declare", step["line"])
-            if step["kind"] == "return":
-                # RETURN ends the procedure — the debug stops here, just like
-                # the real execution would (nothing is sent to the server)
-                started = time.time()
-                entry = self._record("return", step["line"], "SUCCESS",
-                                     step["text"], started, {}, None)
-                self._echo("      RETURN — procedure execution finished.")
-                if finalize:
-                    self._finished = True
-                return entry
-            # atomically executed blocks may contain their own DECLARE:
-            # those leave the batch's initial DECLARE to avoid duplication
-            exclude = frozenset()
-            if step["kind"].endswith("_block"):
-                ti0, ti1 = step["ti"]
-                exclude = frozenset(n.upper() for n, _, _ in
-                                    scan_declares(self._sql, self._tokens, ti0, ti1))
-            text, markers = rewrite(step["text"], self._error_msg,
-                                    self._env.get("@@ROWCOUNT") is not None)
-            binds = [self._env.get("@@ROWCOUNT", 0) if m == "@@ROWCOUNT" else self._error_msg
-                     for m in markers]
-            entry = self._exec_batch(text, binds, step["text"], step["kind"], step["line"],
-                                     exclude=exclude)
-            # a RETURN inside an atomic block ends the batch before the capture:
-            # missing sentinel + RETURN in the text = the procedure returned
-            if (not self._details[entry["step"]]["captured"]
-                    and any(is_word(t, "RETURN") for t in scan(step["text"]))):
-                self._echo("      RETURN executed inside the block — execution finished "
-                           "(variables assigned in this step were not captured).")
-                if finalize:
-                    self._finished = True
-            return entry
-        except Exception:
-            if step["kind"].endswith("_block"):
-                self._echo("      Hint: to pinpoint the exact statement inside the block, "
-                           "use jump_to(n) + step_into().")
-            catch_id = step.get("catch_id")
-            catch_steps = (self._catches[catch_id]
-                           if emulate_catch and catch_id is not None
-                           and catch_id < len(self._catches) else [])
-            if catch_steps:
-                self._echo(f"[CATCH] error inside TRY #{catch_id + 1} — emulating "
-                           f"{len(catch_steps)} step(s) of its CATCH block.")
-                ok = self._emulate_catch(catch_steps)
-                if finalize:
-                    if ok:
-                        # T-SQL semantics: after the CATCH handles the error,
-                        # execution CONTINUES after END CATCH — skip the rest
-                        # of this TRY
-                        skipped = 0
-                        while (self._pos < len(self._steps)
-                               and self._steps[self._pos].get("catch_id") == catch_id):
-                            self._pos += 1
-                            skipped += 1
-                        if skipped:
-                            self._echo(f"[CATCH] {skipped} remaining step(s) of TRY #{catch_id + 1} "
-                                       "skipped; the debug continues after END CATCH.")
-                    else:
-                        self._finished = True
-            elif finalize:
-                self._finished = self._stop_on_error
-            return self._log[-1] if self._log else None
-
-    def _emulate_catch(self, catch_steps):
-        """Run the CATCH steps. Returns False if the CATCH itself failed."""
-        for step in catch_steps:
-            text, markers = rewrite(step["text"], self._error_msg,
-                                    self._env.get("@@ROWCOUNT") is not None)
-            binds = [self._env.get("@@ROWCOUNT", 0) if m == "@@ROWCOUNT" else self._error_msg
-                     for m in markers]
-            try:
-                self._exec_batch(text, binds, "[CATCH] " + step["text"], "catch", step["line"])
-            except Exception:
-                return False
-        return True
+        frames = []
+        for rs in resultsets:
+            df = pd.DataFrame(rs["rows"], columns=rs["columns"])
+            df.attrs["truncated"] = rs["truncated"]
+            frames.append(df)
+        return frames
 
     def _span_text(self, token_span):
         t0, t1 = token_span
@@ -535,8 +711,7 @@ class TSQLDebugger:
         """Evaluate an IF/WHILE condition server-side with the current variables."""
         text, markers = rewrite(cond_text, self._error_msg,
                                 self._env.get("@@ROWCOUNT") is not None)
-        binds = [self._env.get("@@ROWCOUNT", 0) if m == "@@ROWCOUNT" else self._error_msg
-                 for m in markers]
+        binds = [self._bind_for(m) for m in markers]
         self._exec_batch(None, binds, f"condition: {cond_text}", "cond", line,
                          extra_capture=f"CASE WHEN {text} THEN 1 ELSE 0 END AS [__cond__]",
                          update_rowcount=False)
@@ -547,13 +722,14 @@ class TSQLDebugger:
     def _sub_steps(self, body_span, parent):
         """Slice a branch body into individual steps, inheriting the parent context.
 
-        The ctx points at the debugger's real catches list: a BEGIN TRY nested
-        inside the expanded branch registers (and emulates) its own CATCH.
+        The ctx points at the debugger's real catches list (with the span
+        registry): a BEGIN TRY nested inside the expanded branch registers
+        its own CATCH exactly once, even across WHILE iterations.
         """
         b0, b1 = body_span
-        ctx = {"catches": self._catches}
+        ctx = {"catches": self._catches, "span_ids": self._span_ids}
         subs = split_steps(self._sql, self._tokens, b0, b1, ctx,
-                           catch_id=parent.get("catch_id"))
+                           catch_stack=tuple(parent.get("catch_ids", ())))
         for sub in subs:
             sub["depth"] = parent.get("depth", 0) + 1
         return subs
@@ -598,46 +774,77 @@ class TSQLDebugger:
                    f"the WHILE re-evaluates afterwards.")
         return subs
 
-    def run_all(self):
+    def run_all(self) -> object:
         """Run to the end (or until an error, with the CATCH emulated)."""
         while not self._finished and self._pos < len(self._steps):
             self.step()
         return self.log_df()
 
-    def run_until(self, n):
-        """Run up to step n (inclusive) — the 'breakpoint'."""
+    def run_until(self, n: int) -> object:
+        """Run up to step n (inclusive) — the 'breakpoint'.
+
+        Step numbers change after step_into() expansions; re-run list_steps()
+        for current numbers.
+        """
         while not self._finished and self._pos < min(n, len(self._steps)):
             self.step()
         return self.log_df()
 
-    def show_vars(self):
-        """Print and return the current variable state (OUTPUT params included)."""
+    def show_vars(self) -> dict:
+        """Print and return the current variable state (OUTPUT params included).
+
+        Table variables appear with a sentinel string — their content is not
+        tracked across steps.
+        """
         state = {}
         for k in self._vars:
+            name = self._vars[k]["name"]
             if self._vars[k]["table"]:
-                self._echo(f"{self._vars[k]['name']:<20} = <table variable — content not tracked>")
+                state[name] = "<table variable — content not tracked>"
+                self._echo(f"{name:<20} = <table variable — content not tracked>")
             else:
-                state[self._vars[k]["name"]] = self._env[k]
-                self._echo(f"{self._vars[k]['name']:<20} = {_shorten(self._env[k], 300)}")
+                state[name] = self._env[k]
+                self._echo(f"{name:<20} = {_shorten(self._env[k], 300)}")
         state["@@ROWCOUNT"] = self._env.get("@@ROWCOUNT")
         self._echo(f"{'@@ROWCOUNT':<20} = {_shorten(state['@@ROWCOUNT'], 300)}")
         return state
 
-    def sql(self, query):
-        """Ad-hoc query on the SAME session (sees uncommitted state)."""
+    def sql(self, query: str) -> object:
+        """Ad-hoc query on the SAME session (sees uncommitted state).
+
+        Rows are capped at 10,000. On failure the transaction is rolled back
+        (a doomed Fabric transaction would poison every later step) and the
+        error re-raised.
+        """
         cur = self._ensure_connection()
-        cur.execute(query)
+        try:
+            cur.execute(query)
+        except Exception as exc:
+            self._echo(f"[SQL] ad-hoc query failed: {_parse_sql_error(str(exc))[0]}")
+            self._safe_rollback(announce=True)
+            raise
         columns = [d[0] for d in cur.description] if cur.description else []
-        rows = [dict(zip(columns, r)) for r in cur.fetchall()] if columns else []
+        raw_rows = cur.fetchmany(10_000) if columns else []
+        if columns and len(raw_rows) == 10_000:
+            self._echo("[SQL] result truncated at 10,000 rows.")
         while cur.nextset():
             pass
         try:
             import pandas as pd
-            return pd.DataFrame(rows)
+            return pd.DataFrame([list(r) for r in raw_rows], columns=columns)
         except ImportError:
-            return rows
+            return [dict(zip(columns, r)) for r in raw_rows]
 
-    def log_df(self):
+    def rollback(self) -> None:
+        """Undo all data effects so far but keep the session and variables.
+
+        A mid-debug reset of the warehouse state — useful after inspecting
+        the damage of a wrong step, or to re-run a phase from clean data.
+        """
+        self._safe_rollback()
+        self._echo("ROLLBACK executed — data effects undone; captured variables kept.")
+
+    def log_df(self) -> object:
         """Executed-step log as a DataFrame (or a list of dicts without pandas)."""
         try:
             import pandas as pd
@@ -645,15 +852,29 @@ class TSQLDebugger:
         except ImportError:
             return self._log
 
-    def close(self, commit=False):
-        """Close the session. Default: ROLLBACK — nothing persists in the Warehouse."""
+    def close(self, commit: bool = False) -> object:
+        """Close the session. Default: ROLLBACK — nothing persists in the Warehouse.
+
+        Exception-safe: the connection is closed and released even when the
+        final rollback/commit fails (dead session).
+        """
         if self._conn is not None:
-            if not self._autocommit:
-                self._conn.commit() if commit else self._conn.rollback()
-                self._echo("COMMIT executed." if commit
-                           else "ROLLBACK executed — nothing persisted.")
-            self._conn.close()
-            self._conn = None
+            try:
+                if not self._autocommit:
+                    try:
+                        self._conn.commit() if commit else self._conn.rollback()
+                        self._echo("COMMIT executed." if commit
+                                   else "ROLLBACK executed — nothing persisted.")
+                    except Exception as exc:
+                        self._echo(f"[TRANSACTION] final {'COMMIT' if commit else 'ROLLBACK'} "
+                                   f"FAILED — session likely dead: {_parse_sql_error(str(exc))[0]}")
+            finally:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+                self._cursor = None
         return self.log_df()
 
 
@@ -662,7 +883,26 @@ def _shorten(value, limit=80):
     return r if len(r) <= limit else r[:limit] + f"... ({len(r)} chars)"
 
 
+def _parse_sql_error(text):
+    """Extract (message, error_number) from a raw pyodbc error string.
+
+    Joins every '[SQL Server]...' segment (multi-message errors keep all of
+    them) and pulls the first error number, e.g. '(50000)'.
+    """
+    segments = re.split(r"\[SQL Server\]", text)[1:]
+    messages = []
+    for seg in segments:
+        seg = re.sub(r"\s*\(\d+\)\s*\(SQL\w+\)[\s'\")]*$", "", seg.strip())
+        seg = seg.strip(" ;'\")")
+        if seg:
+            messages.append(seg)
+    number_match = re.search(r"\((\d+)\)\s*\(SQL", text)
+    number = int(number_match.group(1)) if number_match else None
+    if messages:
+        return " | ".join(messages), number
+    return text, number
+
+
 def _extract_sql_error(exc):
-    text = str(exc)
-    m = re.search(r"\[SQL Server\](.*?)\s*\(\d+\)\s*\(SQL", text, flags=re.S)
-    return m.group(1).strip() if m else text
+    """Kept for backward compatibility: clean message only."""
+    return _parse_sql_error(str(exc))[0]

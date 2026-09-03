@@ -4,6 +4,44 @@
 
 First release.
 
+Fixes from the four-lens pre-publish review (`docs/REVIEW-2026-09-03.md` —
+data analyst, data engineer, DBA and developer/QA perspectives):
+
+- **CLI**: exit-code computation no longer crashes on the base install
+  (without pandas); quoted `--param` values force strings (leading zeros,
+  literal "NULL"); strict int/float inference (no `1e5`/`nan`/`inf` floats);
+  missing file returns exit 2 with a clean message; loose-script fallback
+  warns and honors `--commit`; `--step-timeout` exposed; documented exit
+  codes.
+- **Engine correctness**: post-CATCH skip covers nested TRY blocks
+  (catch-id stack); connection/internal failures are echoed as `[FATAL]` and
+  re-raised instead of silently finishing; the error entry (not the CATCH's
+  last entry) is returned to the caller; `DECLARE` and `RETURN` inside the
+  emulated CATCH work; bare `THROW` in the CATCH aborts like the real
+  re-raise; step_into condition failures route through the CATCH like
+  step(); the full `ERROR_*()` family is emulated; session `SET` options
+  persist (unparameterized batches); result sets produced before a failure
+  are kept.
+- **Parser**: `IF ... ELSE` without `;` before the ELSE; `COPY`/`GRANT`/
+  `DENY`/`REVOKE`/`DBCC` end an IF condition; bodies without an outer
+  `BEGIN...END` (incl. starting at `BEGIN TRY`) parse correctly; catch
+  registration is idempotent across WHILE re-expansions; multi-encoding
+  `.sql` reading (UTF-8/BOM, UTF-16 BOM, cp1252).
+- **Session lifecycle (DBA)**: context-manager support (`with ... as dbg:`);
+  exception-safe `close()`; public `rollback()`; Ctrl+C cancels the running
+  statement server-side and rolls back; ad-hoc `sql()` errors roll back and
+  are capped at 10k rows; transaction-control detection now covers string
+  literals (dynamic SQL) and flags opaque `EXEC` calls; `autocommit=True`
+  echoes a persistence warning; `APP=tsql-fabric-debugger` + `LoginTimeout`
+  on the connection string.
+- **Observability**: `rows_affected` is `None` when not measured (no more
+  stale values); `post_rollback` column marks steps after a rollback;
+  `show_detail()` prints untruncated changed variables and the raw driver
+  error; `last_results()` DataFrames carry `attrs["truncated"]`;
+  multi-message SQL errors are joined instead of truncated; loose scripts
+  run inside a transaction with ROLLBACK by default and split via the
+  library's scanner; CSV saving works without pandas and uses utf-8-sig.
+
 - `TSQLDebugger`: interactive procedure debugging without touching the
   `.sql` — `step()`, `step_into()` (IF/WHILE statement by statement, with
   the condition evaluated server-side), `run_until()`, `jump_to()`,

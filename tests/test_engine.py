@@ -166,3 +166,126 @@ def test_step_timeout_applied_to_connection(monkeypatch):
                        server="offline", database="offline", echo=lambda *_: None)
     dbg._ensure_connection()
     assert fake.timeout == 30
+
+
+# ---------------------------------------------------------------------------
+# review fixes (docs/REVIEW-2026-09-03.md)
+# ---------------------------------------------------------------------------
+PROC_NESTED_TRY = """
+CREATE PROCEDURE dbo.p_nested @a INT AS
+BEGIN
+    BEGIN TRY
+        SET @a = 1;
+        BEGIN TRY
+            SET @a = 2;
+        END TRY
+        BEGIN CATCH
+            SET @a = -2;
+        END CATCH
+        SET @a = 3;
+    END TRY
+    BEGIN CATCH
+        SET @a = -1;
+    END CATCH
+END;
+"""
+
+
+def test_nested_try_catch_stack_on_steps():
+    dbg = TSQLDebugger(sql_text=PROC_NESTED_TRY, params={"@a": 0},
+                       server="offline", database="offline", echo=lambda *_: None)
+    assert [s["catch_ids"] for s in dbg._steps] == [(0,), (0, 1), (0,)]
+    assert len(dbg._catches) == 2
+
+
+def test_requires_sql_file_or_text():
+    with pytest.raises(ValueError, match="sql_file or sql_text"):
+        TSQLDebugger(server="offline", database="offline", echo=lambda *_: None)
+
+
+def test_set_var_rejects_table_variable():
+    dbg = TSQLDebugger(sql_text=PROC_TABLEVAR, params={},
+                       server="offline", database="offline", echo=lambda *_: None)
+    with pytest.raises(ValueError, match="table variable"):
+        dbg.set_var("@t", [1, 2])
+
+
+def test_autocommit_mode_warns():
+    warnings = []
+    TSQLDebugger(sql_text=PROC_TABLEVAR, params={}, autocommit=True,
+                 server="offline", database="offline", echo=warnings.append)
+    assert any("autocommit=True" in w and "persists immediately" in w for w in warnings)
+
+
+def test_exec_calls_trigger_opaque_notice():
+    warnings = []
+    sql = ("CREATE PROCEDURE dbo.p_exec AS BEGIN "
+           "EXEC dbo.child 1; SET @x = 1; END;")
+    TSQLDebugger(sql_text="CREATE PROCEDURE dbo.p AS BEGIN DECLARE @x INT; EXEC dbo.child; END;",
+                 params={}, server="offline", database="offline", echo=warnings.append)
+    assert any("EXEC call(s)" in w for w in warnings)
+
+
+def test_dynamic_sql_commit_triggers_transaction_warning():
+    warnings = []
+    sql = ("CREATE PROCEDURE dbo.p_dyn AS BEGIN "
+           "DECLARE @s NVARCHAR(100) = N'UPDATE t SET a=1; COMMIT;'; EXEC(@s); END;")
+    TSQLDebugger(sql_text=sql, params={},
+                 server="offline", database="offline", echo=warnings.append)
+    assert any("its own transaction" in w and "string literal" in w for w in warnings)
+
+
+def test_context_manager_closes_and_rolls_back(monkeypatch):
+    import tsql_fabric_debugger.engine as eng
+
+    class FakeConn:
+        timeout = None
+        rolled = False
+        closed = False
+        def cursor(self):
+            return object()
+        def rollback(self):
+            self.rolled = True
+        def close(self):
+            self.closed = True
+
+    fake = FakeConn()
+    monkeypatch.setattr(eng, "connect", lambda *a, **k: fake)
+    with TSQLDebugger(sql_text=PROC_TABLEVAR, params={},
+                      server="offline", database="offline", echo=lambda *_: None) as dbg:
+        dbg._ensure_connection()
+    assert fake.rolled and fake.closed
+    assert dbg._conn is None
+
+
+def test_connection_failure_is_fatal_not_swallowed(monkeypatch):
+    import tsql_fabric_debugger.engine as eng
+
+    def boom(*a, **k):
+        raise RuntimeError("az login expired")
+
+    monkeypatch.setattr(eng, "connect", boom)
+    echoes = []
+    dbg = TSQLDebugger(sql_text=PROC_TABLEVAR, params={},
+                       server="offline", database="offline", echo=echoes.append)
+    dbg.step()                                     # DECLARE @t TABLE: registered, no connection
+    with pytest.raises(RuntimeError, match="az login expired"):
+        dbg.step()                                 # SET @q = 0 needs the server
+    assert any("[FATAL]" in e for e in echoes)     # never a silent finish
+    assert not dbg._finished                       # not a fake clean finish
+
+
+def test_session_set_detection():
+    dbg = _debugger()
+    assert dbg._is_session_set({"kind": "stmt", "text": "SET NOCOUNT ON"})
+    assert dbg._is_session_set({"kind": "stmt", "text": "SET XACT_ABORT ON"})
+    assert not dbg._is_session_set({"kind": "stmt", "text": "SET @total = 1"})
+    assert not dbg._is_session_set({"kind": "if_block", "text": "SET NOCOUNT ON"})
+
+
+def test_parse_sql_error_multi_message_and_number():
+    from tsql_fabric_debugger.engine import _parse_sql_error
+    raw = ("('42000', \"[42000] [Microsoft][ODBC Driver 18 for SQL Server]"
+           "[SQL Server]boom (50000) (SQLExecDirectW)\")")
+    msg, num = _parse_sql_error(raw)
+    assert msg == "boom" and num == 50000

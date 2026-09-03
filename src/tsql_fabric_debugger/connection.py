@@ -27,7 +27,7 @@ def _get_token():
         return AzureCliCredential().get_token(TOKEN_SCOPE).token
 
 
-def connect(server=None, database=None, autocommit=True):
+def connect(server: str | None = None, database: str | None = None, autocommit: bool = True):
     """Open an authenticated (Entra ID) connection. One session = one debug."""
     import pyodbc
 
@@ -44,9 +44,13 @@ def connect(server=None, database=None, autocommit=True):
     token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
     SQL_COPT_SS_ACCESS_TOKEN = 1256
 
+    # APP= makes the debugger identifiable in sys.dm_exec_sessions.program_name
+    # during a blocking investigation; LoginTimeout bounds the connect phase
+    # (step_timeout only covers command execution).
     return pyodbc.connect(
         f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-        f"SERVER={server};DATABASE={database};Encrypt=yes;",
+        f"SERVER={server};DATABASE={database};Encrypt=yes;"
+        f"APP=tsql-fabric-debugger;LoginTimeout=30;",
         attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct},
         autocommit=autocommit,
     )

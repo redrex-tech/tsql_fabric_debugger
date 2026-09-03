@@ -48,6 +48,19 @@ dbg = TSQLDebugger(
     server="<endpoint>.datawarehouse.fabric.microsoft.com",
     database="my_warehouse",
 )
+```
+
+Prefer the context-manager form — it guarantees ROLLBACK + close even when an
+exception interrupts the session, so no orphan transaction is left holding
+locks on the warehouse:
+
+```python
+with TSQLDebugger("prd_load.sql", params={"@year": 2015},
+                  server=..., database=...) as dbg:
+    dbg.run_all()
+```
+
+```python
 
 dbg.list_steps()      # list the numbered steps, without executing
 dbg.step()            # run the next step ("step over": whole IF/WHILE)
@@ -90,7 +103,41 @@ tsql-debug prd_load.sql --param @year=2015 \
 
 Server and database can also come from the `FABRIC_TSQL_SERVER` and
 `FABRIC_TSQL_DATABASE` environment variables. Files without a
-`CREATE PROCEDURE` go through `run_script()` (split on `GO`/`;`).
+`CREATE PROCEDURE` go through `run_script()` — split on `GO` lines when
+present, otherwise per statement via the library's own scanner (a `;` inside
+a string never splits) — also inside a transaction with ROLLBACK by default.
+On the CLI, `--param` values can be quoted (`--param @code='00123'`) to force
+a string and keep leading zeros; unquoted values infer int/float strictly
+(no scientific notation, no `nan`/`inf`). Exit codes: 0 = clean, 1 = at
+least one step recorded an ERROR (even if the procedure's CATCH handled it),
+2 = usage/file error. `.sql` files may be UTF-8 (with or without BOM),
+UTF-16 with BOM (SSMS default) or cp1252.
+
+### Constructor parameters
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `params` | `{}` | test values for procedure parameters (`{"@year": 2015}`) |
+| `autocommit` | `False` | `True` = every step persists immediately (a warning is echoed; `close()` undoes nothing) |
+| `log_level` | `"simple"` | `"full"` prints whole commands, untruncated variables and the SQL batch on errors |
+| `stop_on_error` | `True` | stop the sequential run on an unhandled error |
+| `step_timeout` | `None` | per-step query timeout in seconds (`None` = unlimited) |
+| `max_result_rows` | `50` | rows captured per result set the procedure produces |
+| `max_loop_iterations` | `1000` | guard for `step_into()` on WHILE loops |
+| `preview_chars` | `500` | command truncation in the log's `command` column |
+| `echo` | `print` | console output sink |
+
+### Log columns
+
+`log_df()` / `--csv` (procedure mode): `step`, `line` (file line), `kind`
+(`stmt`/`declare`/`if_block`/`while_block`/`return`/`cond`/`catch`/`params`/`throw`),
+`status` (`SUCCESS`/`ERROR`/`REGISTERED`), `rows_affected` (only for captured
+steps; `None` otherwise), `duration_s`, `command` (truncated preview),
+`changed_vars` (truncated — `show_detail()` has the full values),
+`result_sets`, `post_rollback` (True for steps that ran after an
+error-triggered rollback), `error`. The script mode (`run_script`) logs a
+smaller schema: `step`, `status`, `rows_affected`, `duration_s`, `command`,
+`error`.
 
 ## Security
 
@@ -100,20 +147,66 @@ Server and database can also come from the `FABRIC_TSQL_SERVER` and
   `close(commit=True)` is an explicit decision.
 - Variable re-injection through pyodbc parameters — no value concatenation
   into SQL.
+- Only debug files you trust: the `.sql` **is** code executed under your
+  identity, and rollback-by-default is a convenience, not a security
+  boundary (a `COMMIT` hidden in dynamic SQL persists — the parser warns
+  about literal and string-embedded transaction control, and flags `EXEC`
+  calls it cannot see into).
+- Console output and CSV logs contain **real data** from the warehouse
+  (variable values, result-set rows) — treat them like the data itself.
+
+## Operational notes (read before debugging a shared warehouse)
+
+- **Required permissions**: the debugger does NOT `EXECUTE` the procedure —
+  it runs the body's statements directly under your identity. You need
+  SELECT/INSERT/UPDATE/DELETE on every object the procedure touches
+  (ownership chaining does not apply), and row-level security/column masks
+  apply to *you*, which can make results diverge from a real execution.
+- **Long transactions hold locks**: the debug session keeps one transaction
+  open from the first step until `close()`. Locks from completed steps are
+  retained the whole time — an interactive session parked for an hour blocks
+  concurrent writers and DDL on the touched tables. Debug in a dev
+  warehouse/schema, use the `with` form, and `close()` as soon as you are
+  done. `step_timeout` bounds a *running* statement only.
+- The session identifies itself as `tsql-fabric-debugger` in
+  `sys.dm_exec_sessions.program_name`.
+- Instances are **not thread-safe** (one session, one shared environment).
+- Memory: the full text of every executed batch is kept for `show_detail()`;
+  very long sessions over procedures with multi-MB dynamic SQL grow
+  accordingly.
 
 ## Semantics preserved
 
-- `RETURN` (including guard clauses inside an `IF`) ends the debug, just as
-  it would end the real execution.
+- `RETURN` ends the debug wherever it appears — top level, guard clause
+  inside an `IF`, or inside the emulated `CATCH` — just as it would end the
+  real execution.
 - Each `BEGIN TRY` gets **its own** emulated `CATCH`; after the CATCH handles
-  the error, the debug skips the rest of that TRY and continues after
-  `END CATCH` — the same T-SQL semantics.
+  the error, the debug skips the rest of that TRY (nested TRY blocks
+  included) and continues after `END CATCH` — the same T-SQL semantics. A
+  `THROW` inside the CATCH aborts the debug like the real re-raise would.
+- The full `ERROR_*()` family works in the emulated CATCH: `ERROR_MESSAGE()`,
+  `ERROR_NUMBER()`, `ERROR_PROCEDURE()`, `ERROR_LINE()` (the file line of the
+  failing step), plus `ERROR_SEVERITY()`/`ERROR_STATE()` as RAISERROR-style
+  defaults (16/1) — the driver does not expose the real ones.
+- `DECLARE` inside the CATCH (the classic `DECLARE @msg = ERROR_MESSAGE();`)
+  is emulated correctly.
+- `IF x SET a = 1 ELSE SET a = 2` — no `;` before the `ELSE` — parses and
+  steps correctly.
+- Bodies without an outer `BEGIN...END` (bare statements, or starting
+  straight at `BEGIN TRY`) are supported.
+- Session `SET` options (`NOCOUNT`, `XACT_ABORT`, ...) run unparameterized so
+  they persist for the following steps, as they would in a real execution.
 - `SELECT`s produced by the procedure itself (diagnostics, samples) are
-  captured and displayed (`last_results()`), not discarded.
-- Procedures with inner `COMMIT`/`BEGIN TRAN` raise a parse-time warning: an
-  inner COMMIT persists data even with the debugger's default ROLLBACK.
-- `step_timeout=<seconds>` in the constructor bounds every step — an
-  unfiltered UPDATE won't hang the session holding locks.
+  captured and displayed (`last_results()`), not discarded — including the
+  ones produced before a step failed.
+- Procedures with inner `COMMIT`/`BEGIN TRAN` raise a parse-time warning —
+  including transaction keywords spotted **inside string literals** (dynamic
+  SQL); `EXEC` calls are flagged as opaque.
+- After an error-triggered rollback, the debug warns that following steps run
+  against post-rollback data, and marks them with `post_rollback=True` in the
+  log.
+- `step_timeout=<seconds>` in the constructor bounds every step; Ctrl+C
+  cancels the running statement server-side and rolls back.
 
 ## Practical limits
 
