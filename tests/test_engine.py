@@ -169,7 +169,7 @@ def test_step_timeout_applied_to_connection(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# review fixes (docs/REVIEW-2026-09-03.md)
+# fixes from the pre-publish four-lens review
 # ---------------------------------------------------------------------------
 PROC_NESTED_TRY = """
 CREATE PROCEDURE dbo.p_nested @a INT AS

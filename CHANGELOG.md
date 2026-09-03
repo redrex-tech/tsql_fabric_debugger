@@ -4,7 +4,7 @@
 
 First release.
 
-Fixes from the four-lens pre-publish review (`docs/REVIEW-2026-09-03.md` —
+Fixes from the four-lens pre-publish review (internal review —
 data analyst, data engineer, DBA and developer/QA perspectives):
 
 - **CLI**: exit-code computation no longer crashes on the base install
@@ -60,7 +60,7 @@ data analyst, data engineer, DBA and developer/QA perspectives):
   caught) plus a snapshot/invariant hardening suite.
 
 Semantics fixes from the pre-release gap analysis
-(`docs/GAP-ANALYSIS-2026-09-03.md`):
+(internal gap analysis):
 
 - `RETURN` ends the debug — including when it runs inside an atomic block
   (detected by the missing capture).

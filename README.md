@@ -3,6 +3,11 @@
 Step-by-step debugger for T-SQL stored procedures on the **Microsoft Fabric
 Warehouse** — without changing a single line of your `.sql`.
 
+> This README is the quick tour. The deep dive — why Fabric has no native
+> debugger, how the state engine works inside, the full API reference, and
+> usage from a local machine, a Fabric notebook or AI agents/MCP — lives in
+> [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
+
 ## Why
 
 The Fabric Warehouse has no T-SQL debugger: no breakpoints, no watch, no way

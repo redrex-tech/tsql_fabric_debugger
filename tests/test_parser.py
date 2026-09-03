@@ -76,7 +76,7 @@ def test_while_has_no_else_chain():
 
 
 # ---------------------------------------------------------------------------
-# review fixes (docs/REVIEW-2026-09-03.md)
+# fixes from the pre-publish four-lens review
 # ---------------------------------------------------------------------------
 from tsql_fabric_debugger.parser import scan_transaction_controls  # noqa: E402
 
