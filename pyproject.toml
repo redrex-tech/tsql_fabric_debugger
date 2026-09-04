@@ -43,14 +43,14 @@ testpaths = ["tests"]
 markers = ["integration: requires a real Fabric Warehouse (FABRIC_TSQL_SERVER/DATABASE)"]
 
 [tool.mutmut]
-# Mutation testing only on the pure modules, fully covered by the offline
-# suite. engine/connection/runner/cli need a real Warehouse (env-gated
-# integration tests), so mutants there would survive for lack of an
-# environment, not lack of a test.
+# Mutation testing over scanner, parser AND engine — the engine is now
+# exercised offline through a fake pyodbc session (tests/conftest.py), so its
+# logic (capture, state, error routing, CATCH, breakpoints, child EXEC) is
+# mutation-tested without a warehouse. connection/runner/cli remain excluded:
+# they are thin glue whose real behavior needs the driver/warehouse.
 source_paths = ["src/tsql_fabric_debugger"]
 do_not_mutate = [
     "src/tsql_fabric_debugger/__init__.py",
-    "src/tsql_fabric_debugger/engine.py",
     "src/tsql_fabric_debugger/connection.py",
     "src/tsql_fabric_debugger/runner.py",
     "src/tsql_fabric_debugger/cli.py",

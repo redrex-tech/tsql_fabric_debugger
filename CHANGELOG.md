@@ -41,6 +41,9 @@ Productivity release — the items that turn a step executor into a debugger:
   (batch text/result sets) keeping the last N and every ERROR; `step_into`
   on WHILE now prunes the previous iteration's executed sub-steps, so long
   loops no longer grow the step list per iteration.
+- **Test coverage**: a programmable fake pyodbc session (`tests/conftest.py`)
+  drives the engine offline, adding 32 engine tests and bringing `engine.py`
+  into the mutation-testing scope (previously scanner/parser only).
 
 Post-implementation adversarial review (second pass) fixed: UNION/EXCEPT/
 INTERSECT no longer split a statement (with or without ';'); a child ending
@@ -111,8 +114,7 @@ data analyst, data engineer, DBA and developer/QA perspectives):
   (AzureCliCredential).
 - Batch mode (`run_procedure`), loose scripts (`run_script`) and a CLI
   (`tsql-debug`).
-- Mutation testing with mutmut (`scanner`/`parser` scope, ~85% of mutants
-  caught) plus a snapshot/invariant hardening suite.
+- Mutation testing with mutmut plus a snapshot/invariant hardening suite.
 
 Semantics fixes from the pre-release gap analysis
 (internal gap analysis):

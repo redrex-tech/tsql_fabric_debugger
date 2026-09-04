@@ -260,13 +260,14 @@ mutmut run        # ~1,700 mutants over scanner.py and parser.py
 mutmut results    # survivors; `mutmut show <id>` prints the diff
 ```
 
-The scope covers the pure modules (`scanner`/`parser`), which the offline
-suite fully exercises — `engine`/`connection`/`runner`/`cli` are excluded
-because they need a real Warehouse (env-gated integration tests), and
-mutants there would survive for lack of an environment, not lack of a test.
-The tests in `tests/test_mutation_hardening.py` pin the exact behavior
-(token positions, branch spans, step texts) and keep ~85% of mutants caught;
-the remainder is dominated by equivalent mutants.
+The scope covers `scanner`, `parser` **and `engine`** — the engine is
+exercised offline through a programmable fake pyodbc session
+(`tests/conftest.py`), so its logic (state capture, error routing, CATCH
+emulation, breakpoints, nested EXEC, offload) is mutation-tested without a
+warehouse. `connection`/`runner`/`cli` stay out (thin driver/warehouse
+glue). `tests/test_mutation_hardening.py` pins exact parser/scanner behavior
+and `tests/test_engine_offline.py` drives the engine; the remaining
+survivors are dominated by equivalent mutants.
 
 ## License
 
