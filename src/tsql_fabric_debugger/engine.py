@@ -1606,35 +1606,39 @@ class TSQLDebugger:
                     return self.log_df()
                 continue
             step = self._steps[self._pos]
-            marks = (set(self._breaks) | set(self._logpoints)
-                     if (self._breaks or self._logpoints) else set())
-            if (marks and step["kind"] in ("if_block", "while_block")
-                    and self._break_resume != self._pos
-                    and step["line"] not in self._breaks):
-                # a breakpoint/logpoint INSIDE a block only exists as a step
-                # after the block is expanded — auto step_into blocks that
-                # contain one (a breakpoint on the block's OWN line is
-                # handled below)
+            resuming = self._break_resume == self._pos
+            # 1) a breakpoint on THIS step's own line (a statement, or an
+            #    IF/WHILE header) stops BEFORE the step executes
+            if self._breaks and self._break_should_stop(step):
+                return self.log_df()
+            self._break_resume = None
+            # 2) a block whose BODY holds a breakpoint/logpoint is expanded so
+            #    those inner marks can fire — even when the header itself had a
+            #    breakpoint we just resumed past (the reason a breakpoint inside
+            #    a loop is honored, not skipped by running the loop whole)
+            if (not into and step["kind"] in ("if_block", "while_block")
+                    and (self._breaks or self._logpoints)):
+                marks = set(self._breaks) | set(self._logpoints)
                 end_line = self._sql.count("\n", 0, step["e"]) + 1
                 if any(step["line"] < ml <= end_line for ml in marks):
                     body_text = step["text"].upper()
                     if step.get("is_loop") and ("BREAK" in body_text
                                                 or "CONTINUE" in body_text):
-                        if any(step["line"] < bl <= end_line
-                               for bl in self._breaks):
-                            # step_into cannot expand this loop — stop before
-                            # it instead of running through the breakpoint
+                        # step_into cannot expand a loop with BREAK/CONTINUE
+                        if not resuming and any(step["line"] < bl <= end_line
+                                                for bl in self._breaks):
                             self._break_resume = self._pos
                             self._echo(f"[BREAK] stopped BEFORE the WHILE at line "
                                        f"{step['line']} — it contains a breakpoint but "
                                        "BREAK/CONTINUE prevents expansion; step() runs "
                                        "it whole.")
                             return self.log_df()
-                        # only logpoints inside: they cannot fire, but they
-                        # must never stop execution — notice and run whole
-                        self._echo(f"[NOTICE] logpoint(s) inside the WHILE at line "
-                                   f"{step['line']} cannot fire: BREAK/CONTINUE "
-                                   "prevents expansion — the loop runs whole.")
+                        if not resuming:
+                            self._echo(f"[NOTICE] breakpoint/logpoint inside the WHILE "
+                                       f"at line {step['line']} cannot fire: "
+                                       "BREAK/CONTINUE prevents expansion — the loop "
+                                       "runs whole.")
+                        # fall through: step() runs the loop whole
                     else:
                         self.step_into()
                         if self._loop_aborted:
@@ -1642,9 +1646,6 @@ class TSQLDebugger:
                             self._echo(self._LOOP_ABORT_BREAK)
                             return self.log_df()
                         continue
-            if self._breaks and self._break_should_stop(step):
-                return self.log_df()
-            self._break_resume = None
             entry = self.step_into() if into else self.step()
             if self._pause_on_caught(entry):
                 return self.log_df()
