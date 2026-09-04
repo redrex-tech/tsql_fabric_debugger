@@ -251,8 +251,9 @@ TSQLDebugger(
     database=None,            # warehouse name; falls back to $FABRIC_TSQL_DATABASE
     autocommit=False,         # True = every step persists immediately (warned)
     log_level="simple",       # "full" = whole commands, values, batch on error
-    stop_on_error=True,       # False: continue past errors; "any": run_all() also
-                              #   pauses on CATCH-handled errors
+    stop_on_error=True,       # False: continue past errors; "any": run_all(),
+                              #   run_until() and step_out() also pause on
+                              #   CATCH-handled errors
     preview_chars=500,        # command truncation in the log
     max_loop_iterations=1000, # step_into guard for WHILE loops
     step_timeout=None,        # seconds per step (None = unlimited)
@@ -352,7 +353,7 @@ Watches and breakpoints:
 |---|---|
 | `watch(expr, name=None)` | Track a T-SQL expression after every step — it is appended to each capture batch (e.g. `"(SELECT COUNT(*) FROM stg.t)"`). Values echo per step and are returned by `watches()`. A watch that references a dropped object fails the next step — `unwatch()` it. |
 | `unwatch(name=None)` | Remove one watch, or all of them. |
-| `break_at(line, condition=None, hits=None, once=False)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables; `hits=N` fires from the Nth pass with the condition true (the loop-iteration counter), `once=True` removes the breakpoint after it fires. `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
+| `break_at(line, condition=None, hits=None, once=False)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables; `hits=N` fires from the Nth pass with the condition true (the loop-iteration counter), `once=True` removes the breakpoint after it fires. `breaks()` returns `{line: {"condition", "hits", "once", "count"}}` (0.2.x returned `{line: condition}`). `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
 | `clear_breaks(line=None)` / `breaks()` | Remove/inspect breakpoints. |
 
 Nested EXEC:
@@ -374,7 +375,7 @@ Inspection:
 | `set_log_level(level)` | Switch `"simple"`/`"full"` mid-debug. |
 | `eval(expr)` | One-shot server-side evaluation of a T-SQL expression with the CURRENT variables (`eval("@a * @b")`). Logged as an `eval` entry; a failing expression reports and returns None (data effects of prior steps roll back, variables survive). |
 | `stack()` | The current frame stack, outermost first: procedures in the nested-EXEC chain plus the expanded-block frames of the cursor (loop iteration included). `*` marks the active frame. |
-| `log_at(line, expr=None)` / `clear_logpoints()` / `logpoints()` | Logpoints: echo when a FILE line executes — the expression's server-side value (`?? logpoint = ...`) or a passage marker — without ever stopping. One per line. |
+| `log_at(line, expr=None)` / `clear_logpoints()` / `logpoints()` | Logpoints: echo when a FILE line executes — the expression's server-side value (`?? logpoint_l<line> = ...`) or a passage marker — without stopping on a match. One per line. The expression runs inside the step's batch: one that fails server-side fails the step, exactly like a watch. |
 
 Lifecycle:
 
@@ -392,20 +393,6 @@ Lifecycle:
 | `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
 | `connect(server, database, autocommit=True)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
-
-### IDE integration — Debug Adapter Protocol (DAP)
-
-`tsql-fabric-dap` (a console script installed with the package) speaks the
-Debug Adapter Protocol over stdio, so any DAP client — VS Code with a generic
-DAP bridge extension, nvim-dap, ... — can debug a `.sql` procedure visually:
-gutter breakpoints (condition and hit-count included), step over/into/out,
-the variables pane, hover/REPL evaluation (`evaluate` maps to `eval()`), and
-an exception breakpoint filter for CATCH-handled errors
-(`stop_on_error="any"`). Launch arguments: `program` (path to the `.sql`) or
-`procName` (deployed procedure), `params`, `server`, `database`,
-`stopOnEntry`. One launch = one debugger = one warehouse session; the adapter
-never commits — disconnect rolls back. See the module docstring of
-`tsql_fabric_debugger/dap.py` for a `launch.json` example.
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
 | `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |
@@ -415,6 +402,34 @@ never commits — disconnect rolls back. See the module docstring of
 The lower layers (`scanner.scan`, `parser.split_steps`, ...) are importable
 and stable enough to build tooling on, but the supported public surface is
 the list above.
+
+### IDE integration — Debug Adapter Protocol (DAP)
+
+`tsql-fabric-dap` (a console script installed with the package) speaks the
+Debug Adapter Protocol over stdio, so any DAP client — VS Code with a generic
+DAP bridge extension, nvim-dap, ... — can debug a `.sql` procedure visually:
+gutter breakpoints (condition and hit-count included — `hitCondition` `N`,
+`=N`, `>=N` fire from the Nth pass on), step over/into/out, the variables
+pane, evaluation and an exception breakpoint filter for CATCH-handled errors
+(`stop_on_error="any"`). Breakpoints and exception filters sent before the
+launch (the standard client order) are queued and applied at launch.
+
+Launch arguments: `program` (path to the `.sql`) or `procName` (deployed
+procedure), `params`, `server`, `database`, `stopOnEntry`, plus the engine
+pass-throughs `maxLoopIterations`, `historyBatches`, `logLevel`,
+`stepTimeout`, `lockTimeout`.
+
+Safety and limits: one launch = one debugger = one warehouse session; the
+adapter never commits — disconnect (or the client going away) rolls back.
+**Hover** evaluation answers only for plain `@variables`, from captured state
+— it never executes on the server (a failing expression would roll back the
+transaction's data effects); the debug console (REPL) does execute, with
+`eval()` semantics. The adapter is synchronous: while a `continue` runs on
+the server no other request is processed (there is no `pause`). Line
+breakpoints apply to the launched source only — a child debugger entered via
+stepIn on an EXEC has its own source text. See the module docstring of
+`tsql_fabric_debugger/dap.py` for a `launch.json` example.
+
 
 ## 5. Usage: local machine
 

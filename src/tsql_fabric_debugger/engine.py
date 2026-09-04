@@ -580,6 +580,10 @@ class TSQLDebugger:
             entry, returned = self._execute_step(step)
             if returned and finalize:
                 self._finished = True
+            if finalize:
+                # executing past a paused-at step consumes the pause: the next
+                # stop (if any) is a fresh one, not the stale breakpoint
+                self._break_resume = None
             return entry
         except KeyboardInterrupt:
             raise
@@ -594,6 +598,11 @@ class TSQLDebugger:
                 # clean finish)
                 self._echo(f"[FATAL] failure outside SQL execution: {exc}")
                 raise
+            if lp_temp is not None:
+                self._echo(f"      Hint: the LOGPOINT at line {step['line']} "
+                           f"({self._logpoints.get(step['line'])!r}) ran inside this "
+                           "batch — if the error points at it, clear_logpoints"
+                           f"({step['line']}) and retry.")
             self._disarm_logpoint(lp_temp)
             lp_temp = None       # the CATCH emulation must run WITHOUT it
             self._handle_step_error(step, emulate_catch, finalize)
@@ -999,8 +1008,9 @@ class TSQLDebugger:
         Inside an expanded IF/WHILE (after step_into): runs the remaining
         sub-steps of the block with step() and stops at the first step back
         at the enclosing level — for a WHILE, that is the loop's re-evaluation
-        step (to then leave the LOOP entirely, step() runs every remaining
-        iteration as one server-side batch; run_all() debugs on through them). With an active child debugger (nested EXEC): finishes the child
+        step. To then leave the LOOP entirely: step() runs every remaining
+        iteration as one server-side batch, while run_all() keeps debugging
+        through them. With an active child debugger (nested EXEC): finishes the child
         and collects its OUTPUT values back into this session. At the top
         level there is nothing to step out of — use run_all().
 
@@ -1145,19 +1155,35 @@ class TSQLDebugger:
         if not isinstance(expr, str) or not expr.strip():
             raise ValueError(f"Empty {what} expression.")
         toks = scan(expr)
-        if sum(1 for t in toks if t.get("u") == "(") != \
-                sum(1 for t in toks if t.get("u") == ")"):
-            raise ValueError(f"Unbalanced parentheses in {what} expression.")
-        str_spans = [(t["s"], t["e"]) for t in toks if t.get("k") == "str"]
+        depth = 0
         for t in toks:
-            if t.get("k") == "str":
-                text = expr[t["s"]:t["e"]]
-                if len(text) < 2 or not text.endswith("'"):
-                    raise ValueError(f"Unterminated string in {what} expression.")
-            if t.get("k") == "p" and expr[t["s"]:t["e"]] == ";":
-                raise ValueError(f"';' is not allowed in a {what} expression.")
+            text = expr[t["s"]:t["e"]]
+            kind = t.get("k")
+            if kind == "p":
+                if text == "(":
+                    depth += 1
+                elif text == ")":
+                    depth -= 1
+                    if depth < 0:      # ")... (" balances by count but still
+                        raise ValueError(f"Unbalanced parentheses in {what} "
+                                         "expression.")
+                elif text == ";":
+                    raise ValueError(f"';' is not allowed in a {what} "
+                                     "expression.")
+            elif kind == "str":
+                if not re.fullmatch(r"'(?:[^']|'')*'", text):
+                    raise ValueError(f"Unterminated string in {what} "
+                                     "expression.")
+            elif kind == "brk":
+                closer = "]" if text.startswith("[") else '"'
+                if len(text) < 2 or not text.endswith(closer):
+                    raise ValueError(f"Unterminated quoted identifier in "
+                                     f"{what} expression.")
+        if depth != 0:
+            raise ValueError(f"Unbalanced parentheses in {what} expression.")
+        spans = [(t["s"], t["e"]) for t in toks if t.get("k") in ("str", "brk")]
         for m in re.finditer(r"--|/\*", expr):
-            if not any(s0 <= m.start() < e0 for s0, e0 in str_spans):
+            if not any(s0 <= m.start() < e0 for s0, e0 in spans):
                 raise ValueError(f"Comments (-- or /*) are not allowed in a "
                                  f"{what} expression.")
 
@@ -1167,7 +1193,8 @@ class TSQLDebugger:
         Example: dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg_rows").
         The expression is appended to every capture batch — if it references
         a missing object, the NEXT step fails with that error (unwatch() it).
-        Returns the watch name. The name 'logpoint' is reserved for log_at().
+        Returns the watch name. Names matching 'logpoint_l<line>' (and the
+        bare 'logpoint') are reserved for log_at() output.
         """
         self._validate_expr(expr, "watch")
         if name is not None and re.fullmatch(r"logpoint(_l\d+)?", name):
@@ -1250,7 +1277,7 @@ class TSQLDebugger:
         """Echo when execution passes a FILE line — without ever stopping.
 
         With an expression, its server-side value at that step is printed
-        (`?? logpoint = ...`), exactly like a watch scoped to one line:
+        (`?? logpoint_l<line> = ...`), exactly like a watch scoped to one line:
         dbg.log_at(8, "@fat"). Without one, a passage marker is printed.
         One logpoint per line; calling again replaces it.
 
@@ -1565,6 +1592,10 @@ class TSQLDebugger:
         memory with history_batches=N in the constructor.
         """
         while not self._finished and self._pos < len(self._steps):
+            if self._loop_aborted:
+                self._loop_aborted = False
+                self._echo(self._LOOP_ABORT_BREAK)
+                return self.log_df()
             if self._child is not None:
                 if not self._child_done():
                     self._echo("[CHILD] a child debugger is active — finish it first "
@@ -1606,6 +1637,10 @@ class TSQLDebugger:
                                    "prevents expansion — the loop runs whole.")
                     else:
                         self.step_into()
+                        if self._loop_aborted:
+                            self._loop_aborted = False
+                            self._echo(self._LOOP_ABORT_BREAK)
+                            return self.log_df()
                         continue
             if self._breaks and self._break_should_stop(step):
                 return self.log_df()
@@ -1615,12 +1650,15 @@ class TSQLDebugger:
                 return self.log_df()
             if self._loop_aborted:
                 self._loop_aborted = False
-                self._echo("[BREAK] the WHILE above hit max_loop_iterations — paused "
-                           "so the post-loop steps do not run on PARTIAL loop state. "
-                           "Raise max_loop_iterations and reset(), or run_all() to "
-                           "continue anyway.")
+                self._echo(self._LOOP_ABORT_BREAK)
                 return self.log_df()
+        self._loop_aborted = False       # nothing left to protect
         return self.log_df()
+
+    _LOOP_ABORT_BREAK = ("[BREAK] a WHILE hit max_loop_iterations — paused so the "
+                         "post-loop steps do not run on PARTIAL loop state. "
+                         "Recreate the debugger with a higher max_loop_iterations, "
+                         "or run_all() to continue anyway.")
 
     def _break_should_stop(self, step) -> bool:
         """Evaluate the breakpoint (if any) at this step's line; True = pause."""
@@ -1692,6 +1730,17 @@ class TSQLDebugger:
                 self._echo("[CHILD] a child debugger is active — finish it first "
                            "(child.run_all()) or abort_child().")
                 return self.log_df()
+            step = self._steps[self._pos]
+            if step["kind"] in ("if_block", "while_block") and (self._breaks
+                                                               or self._logpoints):
+                end_line = self._sql.count("\n", 0, step["e"]) + 1
+                inside = [ml for ml in (set(self._breaks) | set(self._logpoints))
+                          if step["line"] < ml <= end_line]
+                if inside:
+                    self._echo(f"[NOTICE] run_until runs blocks whole — breakpoint/"
+                               f"logpoint line(s) {sorted(inside)} inside the block "
+                               f"at line {step['line']} will not fire here "
+                               "(run_all() expands them).")
             entry = self.step()
             if self._pause_on_caught(entry):
                 return self.log_df()

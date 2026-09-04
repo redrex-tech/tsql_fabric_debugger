@@ -1191,3 +1191,72 @@ def test_max_loop_iterations_pauses_run_all(fake_session):
     dbg.run_all(into=True)
     assert any("max_loop_iterations" in l and "[BREAK]" in l for l in lines)
     dbg.close()
+
+
+def test_validate_expr_round2_bypasses(fake_session):
+    dbg = _dbg(fake_session)
+    for bad in ("[foo", '"foo', "'abc''", "1) AS [x], (2"):
+        with pytest.raises(ValueError):
+            dbg.watch(bad)
+    dbg.watch("[a--b]")                            # valid identifier: accepted
+    dbg.close()
+
+
+def test_step_clears_the_breakpoint_pause(fake_session):
+    dbg = _dbg(fake_session)
+    dbg.break_at(5)                                # line of "SET @out = @out + 1"
+    fake_session.turn(updates={"@OUT": 5})
+    dbg.run_all()                                  # pauses BEFORE line 5
+    assert dbg._break_resume is not None
+    fake_session.turn(updates={"@OUT": 6})
+    dbg.step()                                     # manual step past the pause
+    assert dbg._break_resume is None               # stale pause consumed
+    dbg.close()
+
+
+def test_loop_abort_pauses_on_the_auto_expand_path(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=LOOPPROC + "", params={"@n": 99}, server="s",
+                       database="d", echo=lambda m: lines.append(str(m)),
+                       max_loop_iterations=1)
+    dbg.log_at(7, "@i")                            # forces auto-expansion
+    fake_session.turn(updates={"@I": 0})
+    fake_session.turn(cond=1, watches={"logpoint_l7": 0})
+    fake_session.turn(updates={"@I": 1}, watches={"logpoint_l7": 1})
+    fake_session.turn(cond=1)                      # iter 2 -> exceeds max=1
+    dbg.run_all()                                  # into=False: auto-expand path
+    assert any("[BREAK]" in l and "max_loop_iterations" in l for l in lines)
+    dbg.close()
+
+
+def test_dangling_loop_abort_pauses_next_run_all(fake_session):
+    post_loop = LOOPPROC.replace("END;\nEND;", "END;\n    SET @i = @i * 100;\nEND;")
+    lines = []
+    dbg = TSQLDebugger(sql_text=post_loop, params={"@n": 99}, server="s",
+                       database="d", echo=lambda m: lines.append(str(m)),
+                       max_loop_iterations=1)
+    fake_session.turn(updates={"@I": 0})
+    dbg.step()                                     # SET @i = 0
+    fake_session.turn(cond=1)
+    dbg.step_into()                                # iter 1 expanded
+    fake_session.turn(updates={"@I": 1})
+    dbg.step()                                     # body
+    fake_session.turn(cond=1)
+    dbg.step_into()                                # iter 2 -> manual abort
+    assert dbg._loop_aborted
+    dbg.run_all()                                  # must pause BEFORE post-loop
+    assert dbg._env["@I"] == 1                     # SET @i * 100 did NOT run
+    assert any("[BREAK]" in l and "max_loop_iterations" in l for l in lines)
+    dbg.close()
+
+
+def test_run_until_notices_marks_inside_blocks(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 1}, server="s",
+                       database="d", echo=lambda m: lines.append(str(m)))
+    dbg.log_at(7, "@i")
+    fake_session.turn(updates={"@I": 0})
+    fake_session.turn(updates={"@I": 1})           # loop runs whole under run_until
+    dbg.run_until(line=5)                          # up to the WHILE, inclusive
+    assert any("[NOTICE] run_until runs blocks whole" in l for l in lines)
+    dbg.close()
