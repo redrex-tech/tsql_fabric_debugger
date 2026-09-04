@@ -502,6 +502,11 @@ def _parse_client_value(text):
 
 
 def main():
+    import signal
+
+    # a polite kill (SIGTERM) must roll the warehouse session back — raise
+    # SystemExit so serve()'s finally still runs close()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     DapServer(sys.stdin.buffer, sys.stdout.buffer).serve()
 
 
