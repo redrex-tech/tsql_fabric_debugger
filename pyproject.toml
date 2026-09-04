@@ -14,12 +14,16 @@ keywords = ["fabric", "tsql", "debugger", "warehouse", "microsoft-fabric", "sql-
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
     "Topic :: Software Development :: Debuggers",
+    "Typing :: Typed",
 ]
 dependencies = ["pyodbc>=5.0"]
 
@@ -34,6 +38,10 @@ tsql-debug = "tsql_fabric_debugger.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/redrex-tech/tsql_fabric_debugger"
+Repository = "https://github.com/redrex-tech/tsql_fabric_debugger"
+Documentation = "https://github.com/redrex-tech/tsql_fabric_debugger/blob/main/docs/DOCUMENTATION.md"
+Changelog = "https://github.com/redrex-tech/tsql_fabric_debugger/blob/main/CHANGELOG.md"
+Issues = "https://github.com/redrex-tech/tsql_fabric_debugger/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tsql_fabric_debugger"]
