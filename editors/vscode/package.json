@@ -31,7 +31,8 @@
     "onDebugResolve:tsql-fabric",
     "onDebugDynamicConfigurations:tsql-fabric",
     "onView:tsqlFabricFiles",
-    "onView:tsqlFabricWorkspace"
+    "onView:tsqlFabricWorkspace",
+    "onView:tsqlFabricProcedures"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -52,6 +53,11 @@
     "views": {
       "tsqlFabric": [
         {
+          "id": "tsqlFabricProcedures",
+          "name": "Warehouse Procedures",
+          "icon": "media/icon.svg"
+        },
+        {
           "id": "tsqlFabricWorkspace",
           "name": "Fabric Workspace",
           "icon": "media/icon.svg"
@@ -64,6 +70,10 @@
       ]
     },
     "viewsWelcome": [
+      {
+        "view": "tsqlFabricProcedures",
+        "contents": "Connect to a warehouse to browse and debug its stored procedures.\n[Connect to Warehouse](command:tsqlFabric.connect)\n[Check setup](command:tsqlFabric.checkSetup)"
+      },
       {
         "view": "tsqlFabricWorkspace",
         "contents": "Debug T-SQL stored procedures on Microsoft Fabric — right here.\n\nFirst, connect to a warehouse (you pick it from a list; the endpoint is filled in for you).\n[Connect to Warehouse](command:tsqlFabric.connect)\n[Check setup](command:tsqlFabric.checkSetup)\n\nSign-in uses the Azure CLI (az login). Nothing is written to the warehouse — every debug run ends in ROLLBACK."
@@ -111,6 +121,16 @@
         "command": "tsqlFabric.debugFile",
         "title": "T-SQL Fabric: Debug this procedure",
         "icon": "$(debug-alt)"
+      },
+      {
+        "command": "tsqlFabric.refreshProcedures",
+        "title": "T-SQL Fabric: Refresh Procedures",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.debugProcedure",
+        "title": "T-SQL Fabric: Debug this procedure",
+        "icon": "$(debug-alt)"
       }
     ],
     "menus": {
@@ -134,12 +154,27 @@
           "command": "tsqlFabric.refreshFiles",
           "when": "view == tsqlFabricFiles",
           "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.connect",
+          "when": "view == tsqlFabricProcedures",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.refreshProcedures",
+          "when": "view == tsqlFabricProcedures",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
           "command": "tsqlFabric.debugFile",
           "when": "view == tsqlFabricFiles && viewItem == sqlFile",
+          "group": "inline"
+        },
+        {
+          "command": "tsqlFabric.debugProcedure",
+          "when": "view == tsqlFabricProcedures && viewItem == procedure",
           "group": "inline"
         },
         {

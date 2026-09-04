@@ -74,6 +74,7 @@ class DapServer:
         self._configured = False     # configurationDone seen
         self._running = True
         self._frame_nodes = {}       # frameId -> debugger (from stackTrace)
+        self._launch_args = None     # last launch args, for Restart after end
 
     # -- wire protocol ------------------------------------------------------
     def _read_message(self):
@@ -262,9 +263,8 @@ class DapServer:
         })
         self._event("initialized")
 
-    def _on_launch(self, request):
-        args = request.get("arguments", {})
-        self._close_root()               # a second launch must not leak a session
+    def _build_root(self, args):
+        """Create the root debugger from launch arguments."""
         self._source_path = args.get("program")
         self._stop_on_entry = bool(args.get("stopOnEntry", True))
         kwargs = dict(params=args.get("params") or {},
@@ -281,7 +281,13 @@ class DapServer:
                                      ("lockTimeout", "lock_timeout")):
             if args.get(launch_key) is not None:
                 kwargs[ctor_key] = args[launch_key]
-        self._root = TSQLDebugger(**kwargs)
+        return TSQLDebugger(**kwargs)
+
+    def _on_launch(self, request):
+        args = request.get("arguments", {})
+        self._close_root()               # a second launch must not leak a session
+        self._launch_args = args         # kept so Restart can relaunch after end
+        self._root = self._build_root(args)
         if self._pending_filters:
             self._apply_exception_filters(self._pending_filters)
         if self._pending_breaks is not None:
@@ -316,17 +322,18 @@ class DapServer:
             line = bp.get("line")
             log_message = bp.get("logMessage")
             if log_message is not None:
-                # a logpoint (diamond): print without stopping. VS Code sends
-                # a message with {expr} placeholders — we log the FIRST T-SQL
-                # expression in braces, or the whole text as an expression.
-                expr = _logpoint_expr(log_message)
+                # a logpoint (diamond): print without stopping. VS Code sends a
+                # message with {expr} placeholders — the engine evaluates each
+                # {expr} and prints the rest as literal text (so a plain
+                # "reached here" never runs on the server).
                 try:
-                    dbg._validate_expr(expr, "logpoint")
+                    for e in re.findall(r"\{([^}]+)\}", log_message):
+                        dbg._validate_expr(e.strip(), "logpoint")
                 except ValueError as exc:
                     results.append({"verified": False, "line": line,
                                     "message": str(exc)})
                     continue
-                logplan.append((line, expr))
+                logplan.append((line, log_message))
                 results.append({"verified": True, "line": line})
                 continue
             condition = bp.get("condition")
@@ -355,8 +362,8 @@ class DapServer:
             if (old and old["condition"] == condition and old["hits"] == hits
                     and not old["once"]):
                 dbg._breaks[line]["count"] = old["count"]
-        for line, expr in logplan:
-            dbg.log_at(line, expr)
+        for line, message in logplan:
+            dbg.log_at(line, message=message)
         return results
 
     def _on_setBreakpoints(self, request):
@@ -502,10 +509,17 @@ class DapServer:
         self._run_op(request, lambda dbg: dbg.step_out())
 
     def _on_restart(self, request):
-        if not self._require_root(request):
-            return
         try:
-            self._root.reset()   # rollback + replay from the top, same session
+            if self._root is not None:
+                self._root.reset()          # replay in the same session
+            elif self._launch_args is not None:
+                # the run finished (terminated); relaunch from the saved args
+                self._root = self._build_root(self._launch_args)
+                if self._pending_filters:
+                    self._apply_exception_filters(self._pending_filters)
+            else:
+                self._respond(request, success=False, message="nothing to restart")
+                return
         except Exception as exc:
             self._respond(request, success=False, message=str(exc))
             self._terminate()
@@ -545,13 +559,6 @@ class DapServer:
         self._close_root()
         self._respond(request)
         self._running = False
-
-
-def _logpoint_expr(log_message):
-    """The T-SQL expression to log from a VS Code logpoint message: the first
-    {expr} placeholder, or the whole text when there is none."""
-    m = re.search(r"\{([^}]+)\}", log_message or "")
-    return (m.group(1) if m else (log_message or "")).strip()
 
 
 def _parse_client_value(text):

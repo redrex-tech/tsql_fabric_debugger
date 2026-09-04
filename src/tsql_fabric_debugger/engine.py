@@ -413,6 +413,8 @@ class TSQLDebugger:
                                  rows_affected=rows_affected)
             if captured and self._watches and kind not in ("cond", "params"):
                 for wname in self._watches:
+                    if wname.startswith("__lp__"):
+                        continue        # message logpoints render via the template
                     self._echo(f"      ?? {wname} = {_shorten(self._watch_values.get(wname))}")
         except KeyboardInterrupt:
             # pyodbc does not abort the server-side statement on SIGINT —
@@ -615,32 +617,58 @@ class TSQLDebugger:
         return f"logpoint_l{line}"
 
     def _arm_logpoint(self, step):
-        """Attach the line's logpoint (if any) to this step's capture as a
-        temporary watch; returns the watch key to disarm, or None."""
-        if not self._logpoints or step["line"] not in self._logpoints:
-            return None
-        expr = self._logpoints[step["line"]]
-        if expr is None:
-            self._echo(f"      .. logpoint: reached line {step['line']}")
-            return None
-        key = self._logpoint_key(step["line"])
-        if key in self._watches:
-            self._echo(f"[WARNING] a watch named '{key}' exists — the logpoint "
-                       f"expression at line {step['line']} cannot run. "
-                       f"unwatch('{key}') to enable it.")
-            return None
-        self._watches[key] = expr
-        return key
+        """Attach the line's logpoint (if any) to this step's capture; returns
+        an armed handle to disarm/render, or None.
 
-    def _disarm_logpoint(self, key, echo_value=False):
-        if key is not None:
-            self._watches.pop(key, None)
+        Legacy single-expression logpoints use one visible watch (echoed as
+        `?? logpoint_l<line> = ...`). Message logpoints evaluate each {expr}
+        via hidden `__lp__` watches and render the template on disarm.
+        """
+        lp = self._logpoints.get(step["line"]) if self._logpoints else None
+        if lp is None:
+            return None
+        exprs, template = lp["exprs"], lp["template"]
+        if not exprs:
+            marker = template if template is not None else f"reached line {step['line']}"
+            self._echo(f"      .. logpoint: {marker}")
+            return None
+        if template is None:
+            key = self._logpoint_key(step["line"])
+            if key in self._watches:
+                self._echo(f"[WARNING] a watch named '{key}' exists — the logpoint "
+                           f"expression at line {step['line']} cannot run. "
+                           f"unwatch('{key}') to enable it.")
+                return None
+            self._watches[key] = exprs[0]
+            return {"keys": [key], "template": None, "line": step["line"]}
+        keys = []
+        for i, e in enumerate(exprs):
+            key = f"__lp__{step['line']}_{i}"
+            self._watches[key] = e
+            keys.append(key)
+        return {"keys": keys, "template": template, "line": step["line"]}
+
+    def _disarm_logpoint(self, armed, echo_value=False):
+        if armed is None:
+            return
+        keys, template = armed["keys"], armed["template"]
+        if template is None:
+            key = keys[0]
             captured = key in self._watch_values
             value = self._watch_values.pop(key, None)
+            self._watches.pop(key, None)
             if echo_value and captured:
                 # condition-eval entries suppress the normal watch echo —
                 # a header logpoint still owes the user its value
                 self._echo(f"      ?? {key} = {_shorten(value)}")
+            return
+        values = [self._watch_values.pop(k, None) for k in keys]
+        for k in keys:
+            self._watches.pop(k, None)
+        rendered = template
+        for v in values:
+            rendered = rendered.replace("\x00", _shorten(v), 1)
+        self._echo(f"      .. logpoint (line {armed['line']}): {rendered}")
 
     def _handle_step_error(self, step, emulate_catch, finalize):
         if step["kind"].endswith("_block"):
@@ -1273,7 +1301,8 @@ class TSQLDebugger:
         return {line: dict(bp) for line, bp in self._breaks.items()}
 
     # -- logpoints ----------------------------------------------------------
-    def log_at(self, line: int, expr: str | None = None) -> None:
+    def log_at(self, line: int, expr: str | None = None,
+               message: str | None = None) -> None:
         """Echo when execution passes a FILE line — without ever stopping.
 
         With an expression, its server-side value at that step is printed
@@ -1281,19 +1310,39 @@ class TSQLDebugger:
         dbg.log_at(8, "@fat"). Without one, a passage marker is printed.
         One logpoint per line; calling again replaces it.
 
+        A `message` is a template with `{expr}` placeholders (the VS Code
+        logpoint form): each expression is evaluated server-side and
+        interpolated; text outside the braces is printed literally and NEVER
+        evaluated (so a plain "reached here" is safe). Pass `expr` OR
+        `message`, not both.
+
         As with break_at, the line must hold a statement or a block header —
         a logpoint on a BEGIN/END/blank line never matches a step. run_all()
         auto-expands IF/WHILE blocks that contain a logpoint line (loops with
         BREAK/CONTINUE cannot expand — a notice is printed and the loop runs
-        whole). The expression runs inside the step's batch: one that fails
+        whole). Any {expr}/expr runs inside the step's batch: one that fails
         server-side fails the step, exactly like a watch would.
         """
         if isinstance(line, bool) or not isinstance(line, int):
             raise ValueError("line must be an int (a file line number).")
-        if expr is not None:
+        if expr is not None and message is not None:
+            raise ValueError("Pass expr OR message, not both.")
+        if message is not None:
+            exprs = [e.strip() for e in re.findall(r"\{([^}]+)\}", message)]
+            for e in exprs:
+                self._validate_expr(e, "logpoint")
+            template = re.sub(r"\{[^}]+\}", "\x00", message)
+            self._logpoints[line] = {"exprs": exprs, "template": template,
+                                     "message": message}
+            self._echo(f"logpoint at line {line}: {message}")
+        elif expr is not None:
             self._validate_expr(expr, "logpoint")
-        self._logpoints[line] = expr
-        self._echo(f"logpoint at line {line}" + (f": {expr}" if expr else ""))
+            self._logpoints[line] = {"exprs": [expr], "template": None,
+                                     "message": None}
+            self._echo(f"logpoint at line {line}: {expr}")
+        else:
+            self._logpoints[line] = {"exprs": [], "template": None, "message": None}
+            self._echo(f"logpoint at line {line}")
 
     def clear_logpoints(self, line: int | None = None) -> None:
         """Remove the logpoint at one line, or all of them."""
@@ -1305,8 +1354,16 @@ class TSQLDebugger:
             self._echo(f"logpoint at line {line} removed.")
 
     def logpoints(self) -> dict:
-        """Registered logpoints: {line: expression | None}."""
-        return dict(self._logpoints)
+        """Registered logpoints: {line: expression | message | None}."""
+        out = {}
+        for line, lp in self._logpoints.items():
+            if lp["message"] is not None:
+                out[line] = lp["message"]
+            elif lp["exprs"]:
+                out[line] = lp["exprs"][0]
+            else:
+                out[line] = None
+        return out
 
     # -- state snapshots ----------------------------------------------------
     def save_state(self, path: str | None = None) -> dict:

@@ -13,10 +13,12 @@ import {
   getNotebookIpynb,
   getToken,
   listNotebooks,
+  listProcedures,
   listWarehouses,
   listWorkspaces,
   notebookUrl,
   type NotebookItem,
+  type Procedure,
 } from "./fabric";
 
 const TYPE = "tsql-fabric";
@@ -26,6 +28,7 @@ const WS_NAME_KEY = "tsqlFabric.workspaceName";
 export function activate(context: vscode.ExtensionContext): void {
   const filesProvider = new ProjectFilesProvider();
   const fabricProvider = new FabricWorkspaceProvider(context);
+  const proceduresProvider = new ProceduresProvider();
   const status = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100,
@@ -48,7 +51,31 @@ export function activate(context: vscode.ExtensionContext): void {
       "tsqlFabricWorkspace",
       fabricProvider,
     ),
+    vscode.window.registerTreeDataProvider(
+      "tsqlFabricProcedures",
+      proceduresProvider,
+    ),
 
+    vscode.commands.registerCommand("tsqlFabric.refreshProcedures", () => {
+      proceduresProvider.refresh();
+    }),
+    vscode.commands.registerCommand(
+      "tsqlFabric.debugProcedure",
+      async (item?: ProcNode) => {
+        if (!item?.proc) {
+          return;
+        }
+        const name = `${item.proc.schema}.${item.proc.name}`;
+        await vscode.debug.startDebugging(undefined, {
+          type: TYPE,
+          request: "launch",
+          name: `Debug ${name}`,
+          procName: name,
+          params: {},
+          stopOnEntry: true,
+        });
+      },
+    ),
     vscode.commands.registerCommand("tsqlFabric.openSettings", () => {
       void vscode.commands.executeCommand(
         "workbench.action.openSettings",
@@ -62,7 +89,7 @@ export function activate(context: vscode.ExtensionContext): void {
       fabricProvider.refresh();
     }),
     vscode.commands.registerCommand("tsqlFabric.connect", () =>
-      connectToWarehouse(context, status, fabricProvider),
+      connectToWarehouse(context, status, fabricProvider, proceduresProvider),
     ),
     vscode.commands.registerCommand("tsqlFabric.checkSetup", () => checkSetup()),
     // Click a notebook -> open it inside VS Code (download its .ipynb source).
@@ -103,6 +130,29 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  // Inline values: show @variable values next to the code while stopped.
+  context.subscriptions.push(
+    vscode.languages.registerInlineValuesProvider("sql", {
+      provideInlineValues(document, viewport) {
+        const out: vscode.InlineValue[] = [];
+        for (let line = viewport.start.line; line <= viewport.end.line; line++) {
+          const text = document.lineAt(line).text;
+          for (const m of text.matchAll(/@{1,2}\w+/g)) {
+            const start = m.index ?? 0;
+            const range = new vscode.Range(
+              line,
+              start,
+              line,
+              start + m[0].length,
+            );
+            out.push(new vscode.InlineValueVariableLookup(range, m[0], false));
+          }
+        }
+        return out;
+      },
+    }),
+  );
+
   const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,ipynb}");
   watcher.onDidCreate(() => filesProvider.refresh());
   watcher.onDidDelete(() => filesProvider.refresh());
@@ -112,6 +162,8 @@ export function activate(context: vscode.ExtensionContext): void {
     (e) => {
       if (e.affectsConfiguration("tsqlFabric")) {
         refreshStatus(status);
+        proceduresProvider.refresh();
+        fabricProvider.refresh();
       }
     },
     null,
@@ -144,6 +196,7 @@ async function connectToWarehouse(
   context: vscode.ExtensionContext,
   status: vscode.StatusBarItem,
   fabricProvider: FabricWorkspaceProvider,
+  proceduresProvider: ProceduresProvider,
 ): Promise<void> {
   try {
     await vscode.window.withProgress(
@@ -197,6 +250,7 @@ async function connectToWarehouse(
     );
     refreshStatus(status);
     fabricProvider.refresh();
+    proceduresProvider.refresh();
     const db = vscode.workspace
       .getConfiguration("tsqlFabric")
       .get<string>("database");
@@ -425,6 +479,109 @@ function pythonFromPythonExtension(): string | undefined {
     | undefined;
   const cmd = api?.settings?.getExecutionDetails?.().execCommand;
   return cmd && cmd.length > 0 ? cmd[0] : undefined;
+}
+
+function resolvePython(): string {
+  return (
+    vscode.workspace.getConfiguration("tsqlFabric").get<string>("pythonPath") ||
+    pythonFromPythonExtension() ||
+    "python3"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar: the connected warehouse's deployed procedures, grouped by schema.
+// Click one to start a debug session (via procName).
+// ---------------------------------------------------------------------------
+class ProcNode extends vscode.TreeItem {
+  constructor(
+    label: string,
+    state: vscode.TreeItemCollapsibleState,
+    public readonly proc?: Procedure,
+  ) {
+    super(label, state);
+    if (proc) {
+      this.iconPath = new vscode.ThemeIcon("symbol-method");
+      this.contextValue = "procedure";
+      this.tooltip = `${proc.schema}.${proc.name} — click to debug`;
+      this.command = {
+        command: "tsqlFabric.debugProcedure",
+        title: "Debug",
+        arguments: [this],
+      };
+    } else {
+      this.iconPath = new vscode.ThemeIcon("symbol-namespace");
+      this.contextValue = "schema";
+    }
+  }
+}
+
+class ProceduresProvider implements vscode.TreeDataProvider<ProcNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+  private _cache: Procedure[] | undefined;
+
+  refresh(): void {
+    this._cache = undefined;
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(e: ProcNode): vscode.TreeItem {
+    return e;
+  }
+
+  async getChildren(element?: ProcNode): Promise<ProcNode[]> {
+    const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+    const server = cfg.get<string>("server");
+    const database = cfg.get<string>("database");
+    if (!server || !database) {
+      return [
+        new ProcNode(
+          "Not connected — run “Connect to Warehouse”.",
+          vscode.TreeItemCollapsibleState.None,
+        ),
+      ];
+    }
+    const procs = await this.load(server, database);
+    if (procs === null) {
+      return [
+        new ProcNode(
+          "Could not list procedures (see notification).",
+          vscode.TreeItemCollapsibleState.None,
+        ),
+      ];
+    }
+    if (element) {
+      return procs
+        .filter((p) => p.schema === element.label)
+        .map(
+          (p) =>
+            new ProcNode(p.name, vscode.TreeItemCollapsibleState.None, p),
+        );
+    }
+    const schemas = [...new Set(procs.map((p) => p.schema))].sort();
+    return schemas.map(
+      (s) => new ProcNode(s, vscode.TreeItemCollapsibleState.Collapsed),
+    );
+  }
+
+  private async load(
+    server: string,
+    database: string,
+  ): Promise<Procedure[] | null> {
+    if (this._cache) {
+      return this._cache;
+    }
+    try {
+      this._cache = await listProcedures(resolvePython(), server, database);
+      return this._cache;
+    } catch (err) {
+      void vscode.window.showErrorMessage(
+        `T-SQL Fabric: could not list procedures — ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

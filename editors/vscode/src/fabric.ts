@@ -7,6 +7,53 @@ import { execFile } from "node:child_process";
 const FABRIC_API = "https://api.fabric.microsoft.com/v1";
 const FABRIC_RESOURCE = "https://api.fabric.microsoft.com";
 
+export interface Procedure {
+  schema: string;
+  name: string;
+}
+
+// List the warehouse's deployed procedures by spawning the library's
+// introspection CLI (same Python interpreter the adapter uses).
+export function listProcedures(
+  python: string,
+  server: string,
+  database: string,
+): Promise<Procedure[]> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      python,
+      [
+        "-m",
+        "tsql_fabric_debugger.introspect",
+        "procedures",
+        "--server",
+        server,
+        "--database",
+        database,
+      ],
+      { timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(String(stderr || err).trim()));
+          return;
+        }
+        let data: unknown;
+        try {
+          data = JSON.parse(stdout);
+        } catch {
+          reject(new Error(`introspect: unexpected output: ${stdout.slice(0, 200)}`));
+          return;
+        }
+        if (data && typeof data === "object" && "error" in data) {
+          reject(new Error(String((data as { error: unknown }).error)));
+          return;
+        }
+        resolve(data as Procedure[]);
+      },
+    );
+  });
+}
+
 export interface Workspace {
   id: string;
   displayName: string;

@@ -371,7 +371,7 @@ def test_dap_completions_suggests_variables(fake_session, tmp_path):
 
 
 def test_dap_logpoint_via_logmessage(fake_session, tmp_path):
-    fake_session.turn(updates={"@OUT": 5}, watches={"logpoint_l4": 5})
+    fake_session.turn(updates={"@OUT": 5}, watches={"__lp__4_0": 5})
     fake_session.turn(updates={"@OUT": 6})
     messages = _run(_requests(
         ("initialize", {}),
@@ -389,8 +389,41 @@ def test_dap_logpoint_via_logmessage(fake_session, tmp_path):
     assert _by(messages, event="terminated")
 
 
-def test_logpoint_expr_extraction():
-    from tsql_fabric_debugger.dap import _logpoint_expr
-    assert _logpoint_expr("out={@out}") == "@out"
-    assert _logpoint_expr("@fat") == "@fat"
-    assert _logpoint_expr("{@a + @b} rest") == "@a + @b"
+def test_dap_logpoint_plain_text_never_evaluates(fake_session, tmp_path):
+    # regression: a plain-text logMessage must NOT run on the server (it would
+    # be invalid SQL and roll back). It prints literally, session survives.
+    fake_session.turn(updates={"@OUT": 5})       # SET @out = @n
+    fake_session.turn(updates={"@OUT": 6})       # SET @out = @out + 1 (to end)
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("setBreakpoints", {"source": {"path": "proc.sql"},
+                            "breakpoints": [{"line": 4, "logMessage": "reached here"}]}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    bps = _by(messages, command="setBreakpoints")[0]["body"]["breakpoints"]
+    assert bps == [{"verified": True, "line": 4}]
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    assert stops == []                            # never stopped, no error
+    assert _by(messages, event="terminated")
+
+
+def test_dap_restart_after_run_finished_relaunches(fake_session, tmp_path):
+    # restart must work even after the run finished (terminated) — the whole
+    # point of a replay debugger.
+    fake_session.turn(updates={"@OUT": 5})       # 1st run to the end
+    fake_session.turn(updates={"@OUT": 6})
+    fake_session.turn(updates={"@OUT": 5})       # relaunched run
+    fake_session.turn(updates={"@OUT": 6})
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("configurationDone", {}),               # runs to the end -> terminated
+        ("restart", {}),                          # after terminated: relaunch
+        ("continue", {"threadId": 1}),
+        ("disconnect", {}),
+    ))
+    assert _by(messages, command="restart")[0]["success"]
+    # two terminated events: the first run, and the relaunched run
+    assert len(_by(messages, event="terminated")) == 2
