@@ -322,15 +322,15 @@
             }
           },
           {
-            "label": "T-SQL Fabric: debug with prompted parameters",
-            "description": "Ask for a parameter value at launch (input variable).",
+            "label": "T-SQL Fabric: debug a deployed procedure with params",
+            "description": "Fetch a deployed procedure and pass parameter values.",
             "body": {
               "type": "tsql-fabric",
               "request": "launch",
-              "name": "Debug with @year",
-              "program": "^\"\\${file}\"",
+              "name": "Debug deployed procedure",
+              "procName": "pck_am.prd_crgodsrec",
               "params": {
-                "@year": "^\"\\${input:year}\""
+                "@numAnoRef": 2015
               },
               "stopOnEntry": true
             }

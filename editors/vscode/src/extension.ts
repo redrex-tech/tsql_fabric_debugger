@@ -579,8 +579,14 @@ async function promptForParams(
   let params: import("./fabric").ProcParameter[];
   try {
     params = await listParameters(resolvePython(), server, database, procName);
-  } catch {
-    return {}; // introspection failed — debug with no params (they stay NULL)
+  } catch (err) {
+    const go = await vscode.window.showWarningMessage(
+      `T-SQL Fabric: could not read ${procName}'s parameters ` +
+        `(${(err as Error).message}). Debug with all parameters NULL?`,
+      "Debug anyway",
+      "Cancel",
+    );
+    return go === "Debug anyway" ? {} : undefined;
   }
   // Ask only for pure inputs; OUTPUT params (INOUT in INFORMATION_SCHEMA)
   // stay NULL and are filled by the procedure.
@@ -589,7 +595,7 @@ async function promptForParams(
   for (const p of inputs) {
     const raw = await vscode.window.showInputBox({
       title: `Debug ${procName}`,
-      prompt: `${p.name} (${p.type}) — leave empty for NULL`,
+      prompt: `${p.name} (${p.type}) — empty = NULL; quote to force text ('00123')`,
       ignoreFocusOut: true,
     });
     if (raw === undefined) {
@@ -602,8 +608,10 @@ async function promptForParams(
   return values;
 }
 
-// Match the launch.json params semantics: strict int/float, quoted = string,
-// NULL/empty = omit (stays NULL); otherwise a string.
+// Match the launch.json params semantics: quoted = string; NULL = null; a
+// strict integer WITHOUT leading zeros -> int; a strict decimal -> float;
+// anything else stays a string. Leading-zero forms (codes like "00123") stay
+// strings so they are not silently truncated.
 function coerceParam(raw: string): unknown {
   const s = raw.trim();
   if (s.toUpperCase() === "NULL") {
@@ -612,10 +620,13 @@ function coerceParam(raw: string): unknown {
   if (s.length >= 2 && s[0] === s[s.length - 1] && (s[0] === "'" || s[0] === '"')) {
     return s.slice(1, -1);
   }
-  if (/^[+-]?\d+$/.test(s)) {
-    return parseInt(s, 10);
+  if (/^[+-]?(0|[1-9]\d*)$/.test(s)) {
+    // keep BIGINT exact: only use a JS number when it round-trips, else pass
+    // the digits through as a string (the engine binds it correctly)
+    const n = Number(s);
+    return Number.isSafeInteger(n) ? n : s;
   }
-  if (/^[+-]?(\d+\.\d*|\.\d+)$/.test(s)) {
+  if (/^[+-]?(0|[1-9]\d*|)\.\d+$/.test(s)) {
     return parseFloat(s);
   }
   return raw;

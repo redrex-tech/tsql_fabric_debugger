@@ -42,14 +42,16 @@ def list_procedures(server=None, database=None, lock_timeout=30):
 def list_parameters(proc_name, server=None, database=None, lock_timeout=30):
     """Input parameters of a procedure as [{"name", "type", "mode"}] in order.
 
-    proc_name is "schema.proc" (no schema means dbo). mode is "IN" or "OUT"
-    (INFORMATION_SCHEMA.PARAMETERS); the return value / OUTPUT params are
-    included so tooling can skip them when prompting for test values.
+    proc_name is "schema.proc" (no schema means dbo); [bracketed] identifiers
+    are accepted. mode is "IN" for inputs and "INOUT" for OUTPUT parameters
+    (INFORMATION_SCHEMA.PARAMETERS) — OUTPUT params are included so tooling can
+    skip them when prompting for test values.
     """
-    if "." in proc_name:
-        schema, name = proc_name.split(".", 1)
+    parts = [p.strip().strip("[]") for p in proc_name.split(".")]
+    if len(parts) >= 2:
+        schema, name = parts[-2], parts[-1]     # ignore an optional db prefix
     else:
-        schema, name = "dbo", proc_name
+        schema, name = "dbo", parts[0]
     conn = connect(server, database, autocommit=True, lock_timeout=lock_timeout)
     try:
         cur = conn.cursor()
