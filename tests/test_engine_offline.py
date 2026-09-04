@@ -464,3 +464,116 @@ def test_show_detail_after_error_has_raw(fake_session):
     detail = dbg._details[entry["step"]]
     assert "kaput" in detail["raw_error"]
     dbg.close()
+
+
+# ---------------------------------------------------------------------------
+# targeted: state propagation & offload sync (mutation-driven)
+# ---------------------------------------------------------------------------
+def test_loads_from_sql_file(fake_session, tmp_path):
+    path = tmp_path / "p.sql"
+    path.write_text(SIMPLE, encoding="utf-8")
+    dbg = TSQLDebugger(sql_file=str(path), params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    assert dbg.proc_name == "dbo.p"
+    fake_session.turn(updates={"@OUT": 0})
+    dbg.step()
+    dbg.close()
+
+
+def test_child_rollback_propagates_to_parent(fake_session):
+    fake_session.define("dbo.child", CHILD_SRC)
+    dbg = TSQLDebugger(sql_text=PARENT, params={"@n": 3}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg._state_table_ok = True                    # pretend the parent had offloaded
+    child = dbg.step_into()
+    fake_session.fail("child boom")               # child's step fails -> rollback
+    child.step()
+    assert child._rolled_back
+    dbg.run_all()                                 # parent collects the failed child
+    assert dbg._rolled_back is True               # propagated from child
+    assert dbg._state_table_ok is False           # offload table gone with the rollback
+    dbg.close()
+
+
+def test_child_state_table_creation_propagates_on_success(fake_session):
+    fake_session.define("dbo.child", CHILD_SRC)
+    dbg = TSQLDebugger(sql_text=PARENT, params={"@n": 3}, server="s", database="d",
+                       echo=lambda *_: None)
+    child = dbg.step_into()
+    child._state_table_ok = True                  # child created the shared table
+    fake_session.turn(updates={"@DOUBLED": 6})
+    child.step()
+    dbg.step()                                    # collect
+    assert dbg._state_table_ok is True            # parent learns the table exists
+    dbg.close()
+
+
+def test_offload_resyncs_only_on_change(fake_session):
+    dbg = TSQLDebugger(sql_text="CREATE PROCEDURE dbo.p @big NVARCHAR(MAX), @o INT OUTPUT AS "
+                                "BEGIN SET @o = 1; SET @o = 2; END",
+                       params={"@big": "y" * 300}, server="s", database="d",
+                       offload_threshold=100, echo=lambda *_: None)
+    fake_session.turn(updates={"@O": 1})          # step 1
+    dbg.step()
+    syncs_after_1 = sum("INSERT INTO #tsqldbg_state" in q for q in fake_session.executed)
+    fake_session.turn(updates={"@O": 2})          # step 2: @big unchanged
+    dbg.step()
+    syncs_after_2 = sum("INSERT INTO #tsqldbg_state" in q for q in fake_session.executed)
+    assert syncs_after_1 == 1                      # synced once
+    assert syncs_after_2 == 1                      # NOT re-synced (value unchanged)
+    dbg.close()
+
+
+def test_offload_falls_back_when_temp_table_unavailable(fake_session, monkeypatch):
+    dbg = TSQLDebugger(sql_text="CREATE PROCEDURE dbo.p @big NVARCHAR(MAX), @o INT OUTPUT AS "
+                                "BEGIN SET @o = 1; END",
+                       params={"@big": "y" * 300}, server="s", database="d",
+                       offload_threshold=100, echo=lambda *_: None)
+    # make the CREATE TABLE raise so the debugger disables offload and binds normally
+    orig = dbg._sync_offloaded
+
+    from conftest import FakeCursor
+    real_execute = FakeCursor.execute
+
+    def execute(self, sql, params=None):
+        if "CREATE TABLE #tsqldbg_state" in sql:
+            raise RuntimeError("temp tables not supported")
+        return real_execute(self, sql, params)
+
+    monkeypatch.setattr(FakeCursor, "execute", execute)
+    fake_session.turn(updates={"@O": 1})
+    dbg.step()
+    assert dbg._offload_disabled is True           # gracefully degraded
+    dbg.close()
+
+
+def test_hint_only_for_block_steps(fake_session):
+    # the "jump_to + step_into" hint must only fire for *_block steps
+    echoes = []
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
+                       echo=echoes.append)
+    fake_session.fail("if boom")                   # the IF block step fails (step over)
+    dbg.step()
+    assert any("jump_to(n) + step_into()" in e for e in echoes)
+    dbg.close()
+
+
+def test_max_result_rows_truncates(fake_session):
+    dbg = _dbg(fake_session, max_result_rows=2)
+    fake_session.turn(updates={"@OUT": 0},
+                      resultsets=[(["a"], [[1], [2], [3], [4]])])
+    entry = dbg.step()
+    rs = dbg._details[entry["step"]]["resultsets"][0]
+    assert len(rs["rows"]) == 2 and rs["truncated"] is True
+    dbg.close()
+
+
+def test_preview_chars_bounds_the_command(fake_session):
+    long_sql = ("CREATE PROCEDURE dbo.p @o INT OUTPUT AS BEGIN "
+                "SET @o = " + "0+" * 400 + "0; END")
+    dbg = TSQLDebugger(sql_text=long_sql, params={}, server="s", database="d",
+                       preview_chars=40, echo=lambda *_: None)
+    fake_session.turn(updates={"@O": 0})
+    entry = dbg.step()
+    assert len(entry["command"]) <= 40
+    dbg.close()
