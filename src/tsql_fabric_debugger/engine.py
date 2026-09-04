@@ -601,7 +601,9 @@ class TSQLDebugger:
         finally:
             self._disarm_logpoint(lp_temp)
 
-    _LOGPOINT_WATCH = "logpoint"
+    @staticmethod
+    def _logpoint_key(line):
+        return f"logpoint_l{line}"
 
     def _arm_logpoint(self, step):
         """Attach the line's logpoint (if any) to this step's capture as a
@@ -610,15 +612,16 @@ class TSQLDebugger:
             return None
         expr = self._logpoints[step["line"]]
         if expr is None:
-            self._echo(f"      .. logpoint: passed line {step['line']}")
+            self._echo(f"      .. logpoint: reached line {step['line']}")
             return None
-        if self._LOGPOINT_WATCH in self._watches:
-            self._echo(f"[WARNING] a watch named '{self._LOGPOINT_WATCH}' exists — "
-                       f"the logpoint expression at line {step['line']} cannot run. "
-                       "unwatch('logpoint') to enable it.")
+        key = self._logpoint_key(step["line"])
+        if key in self._watches:
+            self._echo(f"[WARNING] a watch named '{key}' exists — the logpoint "
+                       f"expression at line {step['line']} cannot run. "
+                       f"unwatch('{key}') to enable it.")
             return None
-        self._watches[self._LOGPOINT_WATCH] = expr
-        return self._LOGPOINT_WATCH
+        self._watches[key] = expr
+        return key
 
     def _disarm_logpoint(self, key, echo_value=False):
         if key is not None:
@@ -628,7 +631,7 @@ class TSQLDebugger:
             if echo_value and captured:
                 # condition-eval entries suppress the normal watch echo —
                 # a header logpoint still owes the user its value
-                self._echo(f"      ?? logpoint = {_shorten(value)}")
+                self._echo(f"      ?? {key} = {_shorten(value)}")
 
     def _handle_step_error(self, step, emulate_catch, finalize):
         if step["kind"].endswith("_block"):
@@ -996,7 +999,8 @@ class TSQLDebugger:
         Inside an expanded IF/WHILE (after step_into): runs the remaining
         sub-steps of the block with step() and stops at the first step back
         at the enclosing level — for a WHILE, that is the loop's re-evaluation
-        step. With an active child debugger (nested EXEC): finishes the child
+        step (to then leave the LOOP entirely, step() runs every remaining
+        iteration as one server-side batch; run_all() debugs on through them). With an active child debugger (nested EXEC): finishes the child
         and collects its OUTPUT values back into this session. At the top
         level there is nothing to step out of — use run_all().
 
@@ -1166,8 +1170,9 @@ class TSQLDebugger:
         Returns the watch name. The name 'logpoint' is reserved for log_at().
         """
         self._validate_expr(expr, "watch")
-        if name == self._LOGPOINT_WATCH:
-            raise ValueError("'logpoint' is reserved for log_at() output.")
+        if name is not None and re.fullmatch(r"logpoint(_l\d+)?", name):
+            raise ValueError("names matching 'logpoint_l<line>' are reserved "
+                             "for log_at() output.")
         if name is None:
             self._watch_seq += 1
             name = f"w{self._watch_seq}"
@@ -1223,7 +1228,7 @@ class TSQLDebugger:
         if hits is not None:
             extras.append(f"from hit #{hits}")
         if once:
-            extras.append("once")
+            extras.append("fires once, then is removed")
         self._echo(f"breakpoint at line {line}"
                    + (" " + ", ".join(extras) if extras else ""))
 
@@ -1484,7 +1489,7 @@ class TSQLDebugger:
             self._echo("No condition was true and there is no ELSE — the block does nothing.")
             return None
         subs = self._sub_steps(chosen["body"], step)
-        frame = " ".join(step["text"].split())[:60]
+        frame = _clip(" ".join(step["text"].split()), 60)
         for sub in subs:
             sub["frames"] = list(step.get("frames", [])) + [frame]
         self._steps[self._pos:self._pos] = subs
@@ -1527,7 +1532,7 @@ class TSQLDebugger:
                        "on PARTIAL loop state.")
             return None
         subs = self._sub_steps(branch["body"], step)
-        frame = " ".join(step["text"].split())[:60] + f" — iteration {iteration}"
+        frame = _clip(" ".join(step["text"].split()), 60) + f" — iteration {iteration}"
         for sub in subs:
             sub["loop_key"] = loop_key
             sub["frames"] = list(step.get("frames", [])) + [frame]
@@ -1554,6 +1559,10 @@ class TSQLDebugger:
         becomes its own logged step — the friendly way to trace a loop without
         a manual step_into() cycle. Statements that are not blocks (and loops
         with BREAK/CONTINUE) run whole, exactly as with into=False.
+
+        Long loops with into=True log one entry per iteration and keep each
+        entry's full batch text — on thousands of iterations, bound the
+        memory with history_batches=N in the constructor.
         """
         while not self._finished and self._pos < len(self._steps):
             if self._child is not None:
@@ -1735,6 +1744,11 @@ class TSQLDebugger:
             self._echo("      eval failed — its ROLLBACK undid the data effects "
                        "of prior steps (variables survive). show_error() has "
                        "the full message.")
+            if self._rolled_back and not self._warned_post_rollback:
+                self._warned_post_rollback = True
+                self._echo("[TRANSACTION] note: following steps run against the "
+                           "post-rollback data state and may diverge from a "
+                           "real execution.")
             return None
         value = self._env.pop("__eval__", None)
         self._echo(f"      = {_shorten(value, 300)}")
@@ -1760,6 +1774,10 @@ class TSQLDebugger:
                 s = node._steps[node._pos]
                 location = f"line {s['line']}, step {node._pos + 1}"
                 blocks = list(s.get("frames", []))
+                if s.get("is_loop") and s.get("iteration", 1) > 1:
+                    header = _clip(" ".join(s["text"].split()), 60)
+                    blocks.append(f"{header} — re-evaluating before "
+                                  f"iteration {s['iteration']}")
             frames.append({"procedure": node.proc_name, "location": location,
                            "blocks": blocks, "active": node is self})
             node = node._child
@@ -1894,6 +1912,11 @@ def _decode_value(encoded):
         if "__b64__" in encoded:
             return base64.b64decode(encoded["__b64__"])
     return encoded
+
+
+def _clip(text, limit=60):
+    """Plain-text truncation with an explicit marker (no repr quoting)."""
+    return text if len(text) <= limit else text[:limit] + f"... ({len(text)} chars)"
 
 
 def _shorten(value, limit=80):

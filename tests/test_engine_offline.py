@@ -1003,12 +1003,12 @@ def test_logpoint_prints_without_stopping(fake_session):
     dbg = TSQLDebugger(sql_text=SIMPLE, params={"@n": 5}, server="s", database="d",
                        echo=lambda m: lines.append(str(m)))
     dbg.log_at(4, "@n")                           # SET @out = @n line
-    fake_session.turn(updates={"@OUT": 5}, watches={"logpoint": 5})
+    fake_session.turn(updates={"@OUT": 5}, watches={"logpoint_l4": 5})
     fake_session.turn(updates={"@OUT": 6})
     dbg.run_all()
-    assert any("?? logpoint = 5" in l for l in lines)
+    assert any("?? logpoint_l4 = 5" in l for l in lines)
     assert dbg._pos >= len(dbg._steps)            # never stopped
-    assert "logpoint" not in dbg._watches         # disarmed after the step
+    assert "logpoint_l4" not in dbg._watches      # disarmed after the step
     dbg.close()
 
 
@@ -1019,7 +1019,7 @@ def test_logpoint_without_expr_marks_the_passage(fake_session):
     dbg.log_at(4)
     fake_session.turn(updates={"@OUT": 5})
     dbg.step()
-    assert any("logpoint: passed line 4" in l for l in lines)
+    assert any("logpoint: reached line 4" in l for l in lines)
     dbg.close()
 
 
@@ -1050,7 +1050,7 @@ def test_expression_validation_blocks_batch_breakers(fake_session):
 def test_watch_cannot_take_the_logpoint_name(fake_session):
     dbg = _dbg(fake_session)
     with pytest.raises(ValueError, match="reserved"):
-        dbg.watch("@n", name="logpoint")
+        dbg.watch("@n", name="logpoint_l4")
     dbg.close()
 
 
@@ -1061,10 +1061,10 @@ def test_logpoint_inside_block_fires_via_auto_expand(fake_session):
     dbg.log_at(7, "@i")                            # loop body line
     fake_session.turn(updates={"@I": 0})           # SET @i = 0
     fake_session.turn(cond=1)                      # WHILE iter 1
-    fake_session.turn(updates={"@I": 1}, watches={"logpoint": 1})
+    fake_session.turn(updates={"@I": 1}, watches={"logpoint_l7": 1})
     fake_session.turn(cond=0)                      # WHILE ends
     dbg.run_all()                                  # WITHOUT into=True
-    assert any("?? logpoint = 1" in l for l in lines)
+    assert any("?? logpoint_l7 = 1" in l for l in lines)
     assert dbg._pos >= len(dbg._steps)             # never stopped
     dbg.close()
 
@@ -1096,10 +1096,10 @@ def test_logpoint_on_header_fires_with_step_into(fake_session):
     dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
                        echo=lambda m: lines.append(str(m)))
     dbg.log_at(4, "@n")                            # the IF header line
-    fake_session.turn(cond=1, watches={"logpoint": 5})
+    fake_session.turn(cond=1, watches={"logpoint_l4": 5})
     dbg.step_into()
-    assert any("?? logpoint = 5" in l for l in lines)
-    assert "logpoint" not in dbg._watches
+    assert any("?? logpoint_l4 = 5" in l for l in lines)
+    assert "logpoint_l4" not in dbg._watches
     dbg.close()
 
 
