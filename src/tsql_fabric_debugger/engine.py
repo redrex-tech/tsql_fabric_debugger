@@ -612,6 +612,8 @@ class TSQLDebugger:
         finally:
             self._disarm_logpoint(lp_temp)
 
+    _LP_MARK = "\x00\x01__lp__\x01\x00"   # placeholder unlikely in any message
+
     @staticmethod
     def _logpoint_key(line):
         return f"logpoint_l{line}"
@@ -665,9 +667,10 @@ class TSQLDebugger:
         values = [self._watch_values.pop(k, None) for k in keys]
         for k in keys:
             self._watches.pop(k, None)
-        rendered = template
-        for v in values:
-            rendered = rendered.replace("\x00", _shorten(v), 1)
+        parts = template.split(self._LP_MARK)
+        rendered = parts[0]
+        for text, v in zip(parts[1:], values):
+            rendered += _lp_str(v) + text
         self._echo(f"      .. logpoint (line {armed['line']}): {rendered}")
 
     def _handle_step_error(self, step, emulate_catch, finalize):
@@ -1225,9 +1228,10 @@ class TSQLDebugger:
         bare 'logpoint') are reserved for log_at() output.
         """
         self._validate_expr(expr, "watch")
-        if name is not None and re.fullmatch(r"logpoint(_l\d+)?", name):
-            raise ValueError("names matching 'logpoint_l<line>' are reserved "
-                             "for log_at() output.")
+        if name is not None and (re.fullmatch(r"logpoint(_l\d+)?", name)
+                                 or name.startswith("__lp__")):
+            raise ValueError("names matching 'logpoint_l<line>' or '__lp__*' "
+                             "are reserved for log_at() output.")
         if name is None:
             self._watch_seq += 1
             name = f"w{self._watch_seq}"
@@ -1331,7 +1335,7 @@ class TSQLDebugger:
             exprs = [e.strip() for e in re.findall(r"\{([^}]+)\}", message)]
             for e in exprs:
                 self._validate_expr(e, "logpoint")
-            template = re.sub(r"\{[^}]+\}", "\x00", message)
+            template = re.sub(r"\{[^}]+\}", self._LP_MARK, message)
             self._logpoints[line] = {"exprs": exprs, "template": template,
                                      "message": message}
             self._echo(f"logpoint at line {line}: {message}")
@@ -2019,6 +2023,15 @@ def _decode_value(encoded):
         if "__b64__" in encoded:
             return base64.b64decode(encoded["__b64__"])
     return encoded
+
+
+def _lp_str(value, limit=200):
+    """A value as it reads in a logpoint MESSAGE: NULL for None, the string
+    itself (no quotes), truncated — never Python repr."""
+    if value is None:
+        return "NULL"
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + f"… ({len(text)} chars)"
 
 
 def _clip(text, limit=60):

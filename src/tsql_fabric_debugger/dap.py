@@ -292,7 +292,6 @@ class DapServer:
             self._apply_exception_filters(self._pending_filters)
         if self._pending_breaks is not None:
             self._apply_breakpoints(self._pending_breaks)
-            self._pending_breaks = None
         self._respond(request)
         if self._configured:             # configurationDone arrived pre-launch
             self._start_debuggee()
@@ -376,6 +375,9 @@ class DapServer:
                        for bp in args.get("breakpoints", [])]
             self._respond(request, body={"breakpoints": results})
             return
+        # remember the latest set so Restart (which relaunches without a fresh
+        # setBreakpoints from the client) can reapply it
+        self._pending_breaks = args
         self._respond(request, body={"breakpoints": self._apply_breakpoints(args)})
 
     def _apply_exception_filters(self, filters):
@@ -514,9 +516,12 @@ class DapServer:
                 self._root.reset()          # replay in the same session
             elif self._launch_args is not None:
                 # the run finished (terminated); relaunch from the saved args
+                # and reapply the exception filters and breakpoints/logpoints
                 self._root = self._build_root(self._launch_args)
                 if self._pending_filters:
                     self._apply_exception_filters(self._pending_filters)
+                if self._pending_breaks is not None:
+                    self._apply_breakpoints(self._pending_breaks)
             else:
                 self._respond(request, success=False, message="nothing to restart")
                 return

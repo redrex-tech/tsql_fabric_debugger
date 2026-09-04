@@ -427,3 +427,39 @@ def test_dap_restart_after_run_finished_relaunches(fake_session, tmp_path):
     assert _by(messages, command="restart")[0]["success"]
     # two terminated events: the first run, and the relaunched run
     assert len(_by(messages, event="terminated")) == 2
+
+
+def test_dap_restart_after_terminate_keeps_breakpoints(fake_session, tmp_path):
+    # regression: after the run finished, restart must relaunch AND reapply the
+    # breakpoints (VS Code does not re-send them on restart).
+    fake_session.turn(updates={"@OUT": 5})       # 1st run: line 4, stops at bp line 5
+    fake_session.turn(updates={"@OUT": 6})       # 1st run: line 5 (after continue)
+    fake_session.turn(updates={"@OUT": 5})       # relaunch: line 4, stops at bp line 5
+    fake_session.turn(updates={"@OUT": 6})       # relaunch: line 5
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("setBreakpoints", {"source": {"path": "proc.sql"},
+                            "breakpoints": [{"line": 5}]}),
+        ("configurationDone", {}),               # runs, stops at bp line 5
+        ("continue", {"threadId": 1}),           # runs to end -> terminated
+        ("restart", {}),                          # relaunch + reapply bp
+        ("continue", {"threadId": 1}),           # should stop at bp line 5 again
+        ("disconnect", {}),
+    ))
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    # breakpoint before restart, and breakpoint again AFTER restart
+    assert stops.count("breakpoint") == 2, stops
+
+
+def test_logpoint_message_renders_plain(fake_session):
+    from tsql_fabric_debugger.engine import TSQLDebugger
+    lines = []
+    dbg = TSQLDebugger(sql_text=SIMPLE, params={"@n": 5}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(4, message="n={@n} out={@out} done")
+    fake_session.turn(updates={"@OUT": 5}, watches={"__lp__4_0": 5, "__lp__4_1": None})
+    dbg.step()
+    rendered = [l for l in lines if "logpoint (line 4)" in l]
+    assert rendered and "n=5 out=NULL done" in rendered[0]   # plain, NULL not None
+    dbg.close()

@@ -20,9 +20,17 @@ Batch mode: run_procedure(...). Scripts without CREATE PROCEDURE: run_script(...
 """
 
 from .connection import connect, fetch_source, kill_orphan_sessions
-from .introspect import list_procedures
 from .engine import TSQLDebugger
 from .runner import diff_logs, run_procedure, run_script, summarize
 
 __version__ = "0.3.0"
 __all__ = ["TSQLDebugger", "connect", "fetch_source", "kill_orphan_sessions", "list_procedures", "diff_logs", "run_procedure", "run_script", "summarize", "__version__"]
+
+
+def __getattr__(name):
+    # lazy so `python -m tsql_fabric_debugger.introspect` does not trigger a
+    # runpy "found in sys.modules" RuntimeWarning from an eager import here
+    if name == "list_procedures":
+        from .introspect import list_procedures
+        return list_procedures
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

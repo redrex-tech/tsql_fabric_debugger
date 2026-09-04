@@ -33,19 +33,27 @@ export function listProcedures(
       ],
       { timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        if (err) {
-          reject(new Error(String(stderr || err).trim()));
-          return;
-        }
+        // The CLI prints {"error": "..."} to stdout and exits 1 on failure,
+        // so parse stdout FIRST (even when execFile reports a non-zero exit);
+        // fall back to stderr only when there is no JSON error to show.
         let data: unknown;
         try {
           data = JSON.parse(stdout);
         } catch {
-          reject(new Error(`introspect: unexpected output: ${stdout.slice(0, 200)}`));
-          return;
+          data = undefined;
         }
         if (data && typeof data === "object" && "error" in data) {
           reject(new Error(String((data as { error: unknown }).error)));
+          return;
+        }
+        if (err) {
+          reject(new Error(String(stderr || err).trim()));
+          return;
+        }
+        if (data === undefined) {
+          reject(
+            new Error(`introspect: unexpected output: ${stdout.slice(0, 200)}`),
+          );
           return;
         }
         resolve(data as Procedure[]);
