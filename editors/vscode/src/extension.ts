@@ -9,6 +9,7 @@
 import * as vscode from "vscode";
 import {
   FabricAuthError,
+  findWorkspaceForServer,
   getToken,
   listNotebooks,
   listWarehouses,
@@ -520,13 +521,32 @@ class FabricWorkspaceProvider
     return e;
   }
   async getChildren(): Promise<NotebookNode[]> {
-    const wsId = this.context.workspaceState.get<string>(WS_KEY);
+    let wsId = this.context.workspaceState.get<string>(WS_KEY);
     const wsName = this.context.workspaceState.get<string>(WS_NAME_KEY);
-    if (!wsId) {
+    const server = vscode.workspace
+      .getConfiguration("tsqlFabric")
+      .get<string>("server");
+    if (!wsId && !server) {
       return [new NotebookNode("Not connected — run “Connect to Warehouse”.")];
     }
     try {
       const token = await getToken();
+      // Configured via Settings (no explicit Connect)? Discover the workspace
+      // from the SQL endpoint so notebooks still show.
+      if (!wsId && server) {
+        wsId = await findWorkspaceForServer(token, server);
+        if (!wsId) {
+          return [
+            new NotebookNode(
+              "Connected by settings — workspace not found for this endpoint.",
+            ),
+          ];
+        }
+        await this.context.workspaceState.update(WS_KEY, wsId);
+      }
+      if (!wsId) {
+        return [new NotebookNode("Not connected — run “Connect to Warehouse”.")];
+      }
       const notebooks = await listNotebooks(token, wsId);
       if (notebooks.length === 0) {
         return [

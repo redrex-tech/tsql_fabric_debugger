@@ -126,3 +126,20 @@ export async function listNotebooks(
 export function notebookUrl(workspaceId: string, itemId: string): string {
   return `https://app.fabric.microsoft.com/groups/${workspaceId}/synapsenotebooks/${itemId}`;
 }
+
+// Find which workspace owns a warehouse with the given SQL endpoint. Lets the
+// notebook list work when server/database were set in Settings directly,
+// without going through "Connect to Warehouse".
+export async function findWorkspaceForServer(
+  token: string,
+  server: string,
+): Promise<string | undefined> {
+  const target = server.trim().toLowerCase();
+  for (const ws of await listWorkspaces(token)) {
+    const whs = await listWarehouses(token, ws.id).catch(() => []);
+    if (whs.some((w) => w.connectionString.trim().toLowerCase() === target)) {
+      return ws.id;
+    }
+  }
+  return undefined;
+}
