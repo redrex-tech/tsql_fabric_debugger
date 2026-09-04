@@ -2,6 +2,13 @@
 
 ## 0.3.0 — preview
 
+- **Faster startup**: a database token is acquired once and passed to the
+  Python processes, skipping the Azure CLI cold start on every connection
+  (first connect ~4.7s → ~0.6s); warmed in the background on activation.
+- **Safety**: default lockTimeout (30s) and optional stepTimeout on debug
+  sessions; **Kill Orphan Debug Sessions** command; Check Setup now verifies
+  the ODBC Driver 18.
+
 - **Warehouse Procedures** view: browse deployed procedures by schema and
   debug one by clicking — the extension prompts for the input parameters.
 - **Switch Warehouse**: saved connections, switch from the status bar.

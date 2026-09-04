@@ -99,6 +99,11 @@
         "title": "T-SQL Fabric: Check Setup"
       },
       {
+        "command": "tsqlFabric.killOrphans",
+        "title": "T-SQL Fabric: Kill Orphan Debug Sessions",
+        "icon": "$(trash)"
+      },
+      {
         "command": "tsqlFabric.openSettings",
         "title": "T-SQL Fabric: Open Plugin Settings",
         "icon": "$(gear)"
@@ -211,6 +216,16 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Override the debug adapter command. Empty = run `<python> -m tsql_fabric_debugger.dap`. Set to `tsql-fabric-dap` to use the installed console script directly."
+        },
+        "tsqlFabric.lockTimeout": {
+          "type": "number",
+          "default": 30,
+          "markdownDescription": "Seconds a debug step waits on a lock before failing (SET LOCK_TIMEOUT). Bounds how long a paused debug can block other sessions on a shared/production warehouse. `0` disables (wait forever — not recommended)."
+        },
+        "tsqlFabric.stepTimeout": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Seconds a single step may run before it is cancelled. `0` = no limit. Set a limit on production to bound heavy statements."
         }
       }
     },

@@ -19,7 +19,16 @@ SERVER_ENV = "FABRIC_TSQL_SERVER"
 DATABASE_ENV = "FABRIC_TSQL_DATABASE"
 
 
+ACCESS_TOKEN_ENV = "FABRIC_TSQL_ACCESS_TOKEN"
+
+
 def _get_token():
+    # A caller (e.g. the VS Code extension) can hand us a database access token
+    # via the environment so each short-lived process does not pay the Azure
+    # CLI cold start again — the biggest part of "connect" latency.
+    env_token = os.environ.get(ACCESS_TOKEN_ENV)
+    if env_token:
+        return env_token
     try:
         return notebookutils.credentials.getToken(TOKEN_SCOPE)  # noqa: F821
     except NameError:

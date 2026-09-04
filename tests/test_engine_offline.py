@@ -1300,3 +1300,11 @@ def test_list_procedures_via_fake(fake_session):
     result = list_procedures("s", "d")
     assert result == [{"schema": "dbo", "name": "a"},
                       {"schema": "pck", "name": "b"}]
+
+
+def test_access_token_env_skips_az(monkeypatch):
+    # a caller-provided token (VS Code extension) is used, avoiding the az CLI
+    import tsql_fabric_debugger.connection as conn_mod
+    monkeypatch.setenv("FABRIC_TSQL_ACCESS_TOKEN", "a-ready-token")
+    assert conn_mod._get_token() == "a-ready-token"
+    monkeypatch.delenv("FABRIC_TSQL_ACCESS_TOKEN")

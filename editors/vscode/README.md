@@ -68,6 +68,22 @@ This extension does the *debugging*. For IntelliSense, a results grid and
 ad-hoc query editing, install Microsoft's **mssql** extension
 (`ms-mssql.mssql`) — the two complement each other on the same warehouse.
 
+## Debugging safely on a shared / production warehouse
+
+A debug session opens a **real transaction** and executes statements as you
+step. Nothing is committed (ROLLBACK on disconnect), **but** while you are
+paused after an `INSERT`/`UPDATE`/DDL the transaction holds **locks** on those
+tables — other sessions writing them wait until you continue or the session is
+killed. Guardrails:
+
+- **`tsqlFabric.lockTimeout`** (default **30s**) caps how long a step waits on
+  a lock before failing, so a paused debug cannot block others indefinitely.
+- **`tsqlFabric.stepTimeout`** (default off) caps how long a single step runs.
+- **T-SQL Fabric: Kill Orphan Debug Sessions** (Command Palette) reaps the
+  library's sessions left sleeping with an open transaction — for when a debug
+  process died without disconnecting.
+- Prefer a **dev/test warehouse** when debugging heavy load procedures.
+
 ## Use
 
 1. Open the `.sql` file with the `CREATE PROCEDURE` (or pick it in the sidebar).

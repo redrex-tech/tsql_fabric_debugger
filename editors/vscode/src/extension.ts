@@ -11,7 +11,10 @@ import { coerceParam, matchVariables } from "./util";
 import {
   FabricAuthError,
   findWorkspaceForServer,
+  envWithToken,
+  getDatabaseToken,
   getNotebookIpynb,
+  killOrphanSessions,
   getToken,
   listNotebooks,
   listParameters,
@@ -79,6 +82,7 @@ export function activate(context: vscode.ExtensionContext): void {
           procName: name,
           params,
           stopOnEntry: true,
+          ...safetyTimeouts(),
         });
       },
     ),
@@ -101,6 +105,9 @@ export function activate(context: vscode.ExtensionContext): void {
       switchWarehouse(context, status, fabricProvider, proceduresProvider),
     ),
     vscode.commands.registerCommand("tsqlFabric.checkSetup", () => checkSetup()),
+    vscode.commands.registerCommand("tsqlFabric.killOrphans", () =>
+      killOrphans(),
+    ),
     // Click a notebook -> open it inside VS Code (download its .ipynb source).
     vscode.commands.registerCommand(
       "tsqlFabric.openNotebook",
@@ -134,6 +141,7 @@ export function activate(context: vscode.ExtensionContext): void {
           program: uri.fsPath,
           params: {},
           stopOnEntry: true,
+          ...safetyTimeouts(),
         });
       },
     ),
@@ -160,6 +168,13 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidCreate(() => filesProvider.refresh());
   watcher.onDidDelete(() => filesProvider.refresh());
   context.subscriptions.push(watcher);
+
+  // Warm the database token in the background when a warehouse is already
+  // configured, so the first debug/procedure-list does not pay the az cold
+  // start. Best-effort — failures are ignored (auth surfaces later).
+  if (vscode.workspace.getConfiguration("tsqlFabric").get<string>("server")) {
+    void getDatabaseToken().catch(() => undefined);
+  }
 
   vscode.workspace.onDidChangeConfiguration(
     (e) => {
@@ -373,6 +388,36 @@ async function checkSetup(): Promise<void> {
     );
   });
 
+  // ODBC Driver 18 — the most common silent first-run failure
+  await new Promise<void>((resolve) => {
+    execFile(
+      python,
+      [
+        "-c",
+        "import pyodbc,sys;" +
+          "d=[x for x in pyodbc.drivers() if 'ODBC Driver 18 for SQL Server' in x];" +
+          "print('OK' if d else 'MISSING:'+';'.join(pyodbc.drivers()))",
+      ],
+      { timeout: 20000 },
+      (err, stdout) => {
+        const s = stdout.trim();
+        if (!err && s === "OK") {
+          out.appendLine("✓ ODBC Driver 18 for SQL Server — installed");
+        } else {
+          out.appendLine(
+            "✗ ODBC Driver 18 for SQL Server — not found.\n" +
+              "  Install it from https://learn.microsoft.com/sql/connect/odbc/" +
+              "download-odbc-driver-for-sql-server\n" +
+              (s.startsWith("MISSING:")
+                ? `  Drivers seen: ${s.slice(8) || "(none)"}`
+                : ""),
+          );
+        }
+        resolve();
+      },
+    );
+  });
+
   const server = cfg.get<string>("server");
   out.appendLine(
     server
@@ -498,6 +543,13 @@ class TsqlFabricConfigurationProvider
     if (config.params === undefined) {
       config.params = {};
     }
+    const t = safetyTimeouts();
+    if (config.lockTimeout === undefined) {
+      config.lockTimeout = t.lockTimeout;
+    }
+    if (config.stepTimeout === undefined && t.stepTimeout !== undefined) {
+      config.stepTimeout = t.stepTimeout;
+    }
     return config;
   }
 }
@@ -524,22 +576,26 @@ async function ensureValue(
 class TsqlFabricAdapterFactory
   implements vscode.DebugAdapterDescriptorFactory
 {
-  createDebugAdapterDescriptor(
+  async createDebugAdapterDescriptor(
     _session: vscode.DebugSession,
     _executable: vscode.DebugAdapterExecutable | undefined,
-  ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+  ): Promise<vscode.DebugAdapterDescriptor> {
+    // Pass a pre-acquired database token so the adapter's first connection
+    // skips the Azure CLI cold start (the bulk of the startup delay).
+    const env = await envWithToken();
     const cfg = vscode.workspace.getConfiguration("tsqlFabric");
     const explicit = cfg.get<string>("adapterCommand");
     if (explicit) {
       const [command, ...args] = explicit.split(/\s+/);
-      return new vscode.DebugAdapterExecutable(command, args);
+      return new vscode.DebugAdapterExecutable(command, args, { env });
     }
     const python =
       cfg.get<string>("pythonPath") || pythonFromPythonExtension() || "python3";
-    return new vscode.DebugAdapterExecutable(python, [
-      "-m",
-      "tsql_fabric_debugger.dap",
-    ]);
+    return new vscode.DebugAdapterExecutable(
+      python,
+      ["-m", "tsql_fabric_debugger.dap"],
+      { env },
+    );
   }
 }
 
@@ -558,6 +614,64 @@ function resolvePython(): string {
     pythonFromPythonExtension() ||
     "python3"
   );
+}
+
+// Default safety timeouts for a debug session: a lock timeout so a paused
+// debug cannot block other sessions forever, and an optional step timeout.
+function safetyTimeouts(): { lockTimeout?: number; stepTimeout?: number } {
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const out: { lockTimeout?: number; stepTimeout?: number } = {};
+  const lock = cfg.get<number>("lockTimeout", 30);
+  if (lock && lock > 0) {
+    out.lockTimeout = lock;
+  }
+  const step = cfg.get<number>("stepTimeout", 0);
+  if (step && step > 0) {
+    out.stepTimeout = step;
+  }
+  return out;
+}
+
+async function killOrphans(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  if (!server || !database) {
+    void vscode.window.showWarningMessage(
+      "T-SQL Fabric: connect to a warehouse first.",
+    );
+    return;
+  }
+  const minutes = await vscode.window.showInputBox({
+    title: "Kill orphan debug sessions",
+    prompt:
+      "Kill this library's sessions that are sleeping with an open " +
+      "transaction and idle at least N minutes. A paused interactive debug " +
+      "looks like an orphan — use a high value on shared warehouses.",
+    value: "15",
+    ignoreFocusOut: true,
+  });
+  if (minutes === undefined) {
+    return;
+  }
+  const minIdle = Math.max(0, Math.round(Number(minutes) * 60) || 0);
+  try {
+    const killed = await killOrphanSessions(
+      resolvePython(),
+      server,
+      database,
+      minIdle,
+    );
+    void vscode.window.showInformationMessage(
+      killed.length
+        ? `T-SQL Fabric: killed ${killed.length} orphan session(s): ${killed.join(", ")}.`
+        : "T-SQL Fabric: no orphan debug sessions found.",
+    );
+  } catch (err) {
+    void vscode.window.showErrorMessage(
+      `T-SQL Fabric: ${(err as Error).message}`,
+    );
+  }
 }
 
 // Ask for the procedure's INPUT parameter values before debugging. Returns a

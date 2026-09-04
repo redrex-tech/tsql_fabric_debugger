@@ -7,6 +7,62 @@ import { parseIntrospectResult } from "./util";
 
 const FABRIC_API = "https://api.fabric.microsoft.com/v1";
 const FABRIC_RESOURCE = "https://api.fabric.microsoft.com";
+const DATABASE_RESOURCE = "https://database.windows.net/";
+export const ACCESS_TOKEN_ENV = "FABRIC_TSQL_ACCESS_TOKEN";
+
+// Cache a warehouse (database) access token so each short-lived Python process
+// we spawn reuses it instead of paying the Azure CLI cold start again — the
+// biggest part of "connect" latency. The token is passed to Python via env.
+let dbTokenCache: { token: string; expiresAt: number } | undefined;
+
+export function getDatabaseToken(azPath = "az"): Promise<string> {
+  if (dbTokenCache && dbTokenCache.expiresAt - Date.now() > 120_000) {
+    return Promise.resolve(dbTokenCache.token);
+  }
+  return new Promise((resolve, reject) => {
+    execFile(
+      azPath,
+      ["account", "get-access-token", "--resource", DATABASE_RESOURCE, "--output", "json"],
+      { timeout: 30000 },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(String(stderr || err).trim()));
+          return;
+        }
+        try {
+          const j = JSON.parse(stdout) as {
+            accessToken: string;
+            expires_on?: number;
+          };
+          const expiresAt = j.expires_on
+            ? j.expires_on * 1000
+            : Date.now() + 50 * 60 * 1000;
+          dbTokenCache = { token: j.accessToken, expiresAt };
+          resolve(j.accessToken);
+        } catch {
+          reject(new Error("could not parse the Azure CLI token"));
+        }
+      },
+    );
+  });
+}
+
+// Build a child-process environment carrying the database token when we can
+// get it, so Python skips the az cold start; falls back to Python's own auth.
+export async function envWithToken(): Promise<Record<string, string>> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) {
+      env[k] = v;
+    }
+  }
+  try {
+    env[ACCESS_TOKEN_ENV] = await getDatabaseToken();
+  } catch {
+    /* no token — Python falls back to its own auth chain */
+  }
+  return env;
+}
 
 export interface Procedure {
   schema: string;
@@ -19,12 +75,13 @@ export interface ProcParameter {
   mode: string; // "IN" | "OUT" | "INOUT"
 }
 
-function runIntrospect(python: string, args: string[]): Promise<unknown> {
+async function runIntrospect(python: string, args: string[]): Promise<unknown> {
+  const env = await envWithToken();
   return new Promise((resolve, reject) => {
     execFile(
       python,
       ["-m", "tsql_fabric_debugger.introspect", ...args],
-      { timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
+      { timeout: 60000, maxBuffer: 8 * 1024 * 1024, env },
       (err, stdout, stderr) => {
         const r = parseIntrospectResult(stdout, err != null, String(stderr || err || ""));
         if ("error" in r) {
@@ -35,6 +92,24 @@ function runIntrospect(python: string, args: string[]): Promise<unknown> {
       },
     );
   });
+}
+
+export async function killOrphanSessions(
+  python: string,
+  server: string,
+  database: string,
+  minIdleSeconds: number,
+): Promise<number[]> {
+  const r = (await runIntrospect(python, [
+    "kill-orphans",
+    "--server",
+    server,
+    "--database",
+    database,
+    "--min-idle",
+    String(minIdleSeconds),
+  ])) as { killed: number[] };
+  return r.killed ?? [];
 }
 
 export async function listParameters(

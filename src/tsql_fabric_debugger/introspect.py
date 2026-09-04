@@ -15,7 +15,7 @@ import argparse
 import json
 import sys
 
-from .connection import connect
+from .connection import connect, kill_orphan_sessions
 
 
 def list_procedures(server=None, database=None, lock_timeout=30):
@@ -71,15 +71,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="tsql-fabric-introspect",
         description="List warehouse objects as JSON (for tooling).")
-    ap.add_argument("what", choices=["procedures", "parameters"],
-                    help="what to list")
+    ap.add_argument("what", choices=["procedures", "parameters", "kill-orphans"],
+                    help="what to list, or the orphan-session janitor")
     ap.add_argument("--proc", help="schema.proc (required for parameters)")
     ap.add_argument("--server", help="SQL endpoint (or env FABRIC_TSQL_SERVER)")
     ap.add_argument("--database", help="warehouse (or env FABRIC_TSQL_DATABASE)")
     ap.add_argument("--lock-timeout", type=int, default=30, metavar="SECONDS")
+    ap.add_argument("--min-idle", type=int, default=900, metavar="SECONDS",
+                    help="idle threshold for kill-orphans")
     args = ap.parse_args(argv)
     try:
-        if args.what == "parameters":
+        if args.what == "kill-orphans":
+            killed = kill_orphan_sessions(args.server, args.database,
+                                          min_idle_seconds=args.min_idle,
+                                          echo=lambda *_: None)
+            result = {"killed": killed}
+        elif args.what == "parameters":
             if not args.proc:
                 raise ValueError("--proc is required for parameters")
             result = list_parameters(args.proc, args.server, args.database,
