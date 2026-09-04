@@ -2,6 +2,13 @@
 
 ## 0.3.0 — preview
 
+- **Warehouse Procedures** view: browse deployed procedures by schema and
+  debug one by clicking — the extension prompts for the input parameters.
+- **Switch Warehouse**: saved connections, switch from the status bar.
+- Debug UX: **Restart**, **Stop**, **logpoints** (diamond), exception details,
+  **inline @variable values**, and Debug Console **autocomplete**.
+- Recommends the **mssql** extension for IntelliSense/results grid.
+
 - Clicking a notebook in **Fabric Workspace** now opens it **inside VS Code**
   (downloads its .ipynb); the ↗ button opens it in the Fabric web UI to run.
 

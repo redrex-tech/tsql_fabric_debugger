@@ -50,11 +50,23 @@ Empty reuses the one picked by the Python extension, else `python3` on PATH.
 
 ## The T-SQL Fabric sidebar
 
-Click the **T-SQL Fabric** icon in the Activity Bar (left edge) to open a view
-that lists every `.sql` procedure and `.ipynb` notebook in the open folder —
-click one to open it. A `.sql` row has an inline **debug** button (▷) that
-starts a debug session for it. The view title has two buttons: **refresh** the
-list, and the **gear** to open this plugin's settings.
+Click the **T-SQL Fabric** icon in the Activity Bar (left edge) for three views:
+
+- **Warehouse Procedures** — every deployed procedure, grouped by schema.
+  Click one (or its ▷ button) to debug it: the extension asks for the input
+  parameter values, then starts the session — no name typing, no launch.json.
+- **Fabric Workspace** — the notebooks your account can see; click to open in
+  VS Code (↗ opens in the Fabric web UI).
+- **Project Files** — the local `.sql`/`.ipynb` in the open folder.
+
+The status bar shows the connected warehouse; click it to **switch** between
+saved connections or connect to a new one.
+
+### Works well alongside the mssql extension
+
+This extension does the *debugging*. For IntelliSense, a results grid and
+ad-hoc query editing, install Microsoft's **mssql** extension
+(`ms-mssql.mssql`) — the two complement each other on the same warehouse.
 
 ## Use
 

@@ -1278,3 +1278,25 @@ def test_breakpoint_on_while_header_and_body_stops_in_body(fake_session):
     assert dbg._steps[dbg._pos]["line"] == 7    # stopped INSIDE the loop
     assert dbg._env["@I"] == 0                  # body not executed yet
     dbg.close()
+
+
+def test_list_parameters_via_fake(fake_session):
+    from tsql_fabric_debugger.introspect import list_parameters
+    # FakeSession answers registered ad-hoc queries by needle
+    fake_session.adhoc.append(("information_schema.parameters",
+                               ["PARAMETER_NAME", "DATA_TYPE", "PARAMETER_MODE"],
+                               [("@numAnoRef", "int", "IN"),
+                                ("@out", "int", "INOUT")]))
+    result = list_parameters("pck_am.prd_x", "s", "d")
+    assert result == [{"name": "@numAnoRef", "type": "int", "mode": "IN"},
+                      {"name": "@out", "type": "int", "mode": "INOUT"}]
+
+
+def test_list_procedures_via_fake(fake_session):
+    from tsql_fabric_debugger.introspect import list_procedures
+    fake_session.adhoc.append(("information_schema.routines",
+                               ["ROUTINE_SCHEMA", "ROUTINE_NAME"],
+                               [("dbo", "a"), ("pck", "b")]))
+    result = list_procedures("s", "d")
+    assert result == [{"schema": "dbo", "name": "a"},
+                      {"schema": "pck", "name": "b"}]

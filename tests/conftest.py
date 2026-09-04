@@ -196,6 +196,7 @@ def fake_session(monkeypatch):
     """
     import tsql_fabric_debugger.connection as conn_mod
     import tsql_fabric_debugger.engine as eng
+    import tsql_fabric_debugger.introspect as intro_mod
     import tsql_fabric_debugger.runner as run_mod
 
     session = FakeSession()
@@ -207,4 +208,5 @@ def fake_session(monkeypatch):
     monkeypatch.setattr(eng, "connect", _connect)
     monkeypatch.setattr(run_mod, "connect", _connect)
     monkeypatch.setattr(conn_mod, "connect", _connect)
+    monkeypatch.setattr(intro_mod, "connect", _connect)
     return session

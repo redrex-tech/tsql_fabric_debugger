@@ -12,30 +12,19 @@ export interface Procedure {
   name: string;
 }
 
-// List the warehouse's deployed procedures by spawning the library's
-// introspection CLI (same Python interpreter the adapter uses).
-export function listProcedures(
-  python: string,
-  server: string,
-  database: string,
-): Promise<Procedure[]> {
+export interface ProcParameter {
+  name: string; // @-prefixed
+  type: string;
+  mode: string; // "IN" | "OUT" | "INOUT"
+}
+
+function runIntrospect(python: string, args: string[]): Promise<unknown> {
   return new Promise((resolve, reject) => {
     execFile(
       python,
-      [
-        "-m",
-        "tsql_fabric_debugger.introspect",
-        "procedures",
-        "--server",
-        server,
-        "--database",
-        database,
-      ],
+      ["-m", "tsql_fabric_debugger.introspect", ...args],
       { timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        // The CLI prints {"error": "..."} to stdout and exits 1 on failure,
-        // so parse stdout FIRST (even when execFile reports a non-zero exit);
-        // fall back to stderr only when there is no JSON error to show.
         let data: unknown;
         try {
           data = JSON.parse(stdout);
@@ -56,10 +45,43 @@ export function listProcedures(
           );
           return;
         }
-        resolve(data as Procedure[]);
+        resolve(data);
       },
     );
   });
+}
+
+export async function listParameters(
+  python: string,
+  server: string,
+  database: string,
+  procName: string,
+): Promise<ProcParameter[]> {
+  return (await runIntrospect(python, [
+    "parameters",
+    "--proc",
+    procName,
+    "--server",
+    server,
+    "--database",
+    database,
+  ])) as ProcParameter[];
+}
+
+// List the warehouse's deployed procedures by spawning the library's
+// introspection CLI (same Python interpreter the adapter uses).
+export async function listProcedures(
+  python: string,
+  server: string,
+  database: string,
+): Promise<Procedure[]> {
+  return (await runIntrospect(python, [
+    "procedures",
+    "--server",
+    server,
+    "--database",
+    database,
+  ])) as Procedure[];
 }
 
 export interface Workspace {

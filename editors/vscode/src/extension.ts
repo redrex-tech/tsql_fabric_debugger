@@ -13,6 +13,7 @@ import {
   getNotebookIpynb,
   getToken,
   listNotebooks,
+  listParameters,
   listProcedures,
   listWarehouses,
   listWorkspaces,
@@ -33,7 +34,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.StatusBarAlignment.Left,
     100,
   );
-  status.command = "tsqlFabric.connect";
+  status.command = "tsqlFabric.switchWarehouse";
   context.subscriptions.push(status);
   refreshStatus(status);
 
@@ -66,12 +67,16 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         const name = `${item.proc.schema}.${item.proc.name}`;
+        const params = await promptForParams(name);
+        if (params === undefined) {
+          return; // cancelled
+        }
         await vscode.debug.startDebugging(undefined, {
           type: TYPE,
           request: "launch",
           name: `Debug ${name}`,
           procName: name,
-          params: {},
+          params,
           stopOnEntry: true,
         });
       },
@@ -90,6 +95,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("tsqlFabric.connect", () =>
       connectToWarehouse(context, status, fabricProvider, proceduresProvider),
+    ),
+    vscode.commands.registerCommand("tsqlFabric.switchWarehouse", () =>
+      switchWarehouse(context, status, fabricProvider, proceduresProvider),
     ),
     vscode.commands.registerCommand("tsqlFabric.checkSetup", () => checkSetup()),
     // Click a notebook -> open it inside VS Code (download its .ipynb source).
@@ -246,6 +254,14 @@ async function connectToWarehouse(
         await cfg.update("database", wh.label, target);
         await context.workspaceState.update(WS_KEY, ws.id);
         await context.workspaceState.update(WS_NAME_KEY, ws.label);
+        // remember it in the saved-connections list for quick switching
+        saveConnection(context, {
+          label: `${wh.label} — ${ws.label}`,
+          server: wh.connectionString,
+          database: wh.label,
+          workspaceId: ws.id,
+          workspaceName: ws.label,
+        });
       },
     );
     refreshStatus(status);
@@ -262,6 +278,66 @@ async function connectToWarehouse(
   } catch (err) {
     reportError(err);
   }
+}
+
+// -- saved connections ------------------------------------------------------
+interface SavedConnection {
+  label: string;
+  server: string;
+  database: string;
+  workspaceId?: string;
+  workspaceName?: string;
+}
+const CONNECTIONS_KEY = "tsqlFabric.savedConnections";
+
+function saveConnection(
+  context: vscode.ExtensionContext,
+  conn: SavedConnection,
+): void {
+  const all = context.globalState.get<SavedConnection[]>(CONNECTIONS_KEY, []);
+  const rest = all.filter(
+    (c) => !(c.server === conn.server && c.database === conn.database),
+  );
+  void context.globalState.update(CONNECTIONS_KEY, [conn, ...rest].slice(0, 20));
+}
+
+async function switchWarehouse(
+  context: vscode.ExtensionContext,
+  status: vscode.StatusBarItem,
+  fabricProvider: FabricWorkspaceProvider,
+  proceduresProvider: ProceduresProvider,
+): Promise<void> {
+  const saved = context.globalState.get<SavedConnection[]>(CONNECTIONS_KEY, []);
+  const items: (vscode.QuickPickItem & { conn?: SavedConnection })[] = saved.map(
+    (c) => ({ label: c.label, detail: `${c.database} — ${c.server}`, conn: c }),
+  );
+  items.push({
+    label: "$(plug) Connect to a new warehouse…",
+    conn: undefined,
+  });
+  const pick = await vscode.window.showQuickPick(items, {
+    title: "Switch warehouse",
+    placeHolder: "Pick a saved connection, or connect to a new one",
+  });
+  if (!pick) {
+    return;
+  }
+  if (!pick.conn) {
+    await connectToWarehouse(context, status, fabricProvider, proceduresProvider);
+    return;
+  }
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  await cfg.update("server", pick.conn.server, vscode.ConfigurationTarget.Global);
+  await cfg.update(
+    "database",
+    pick.conn.database,
+    vscode.ConfigurationTarget.Global,
+  );
+  await context.workspaceState.update(WS_KEY, pick.conn.workspaceId);
+  await context.workspaceState.update(WS_NAME_KEY, pick.conn.workspaceName);
+  refreshStatus(status);
+  fabricProvider.refresh();
+  proceduresProvider.refresh();
 }
 
 async function checkSetup(): Promise<void> {
@@ -487,6 +563,62 @@ function resolvePython(): string {
     pythonFromPythonExtension() ||
     "python3"
   );
+}
+
+// Ask for the procedure's INPUT parameter values before debugging. Returns a
+// params object, {} if the procedure takes none, or undefined if cancelled.
+async function promptForParams(
+  procName: string,
+): Promise<Record<string, unknown> | undefined> {
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  if (!server || !database) {
+    return {};
+  }
+  let params: import("./fabric").ProcParameter[];
+  try {
+    params = await listParameters(resolvePython(), server, database, procName);
+  } catch {
+    return {}; // introspection failed — debug with no params (they stay NULL)
+  }
+  // Ask only for pure inputs; OUTPUT params (INOUT in INFORMATION_SCHEMA)
+  // stay NULL and are filled by the procedure.
+  const inputs = params.filter((p) => p.mode === "IN");
+  const values: Record<string, unknown> = {};
+  for (const p of inputs) {
+    const raw = await vscode.window.showInputBox({
+      title: `Debug ${procName}`,
+      prompt: `${p.name} (${p.type}) — leave empty for NULL`,
+      ignoreFocusOut: true,
+    });
+    if (raw === undefined) {
+      return undefined; // cancelled
+    }
+    if (raw !== "") {
+      values[p.name] = coerceParam(raw);
+    }
+  }
+  return values;
+}
+
+// Match the launch.json params semantics: strict int/float, quoted = string,
+// NULL/empty = omit (stays NULL); otherwise a string.
+function coerceParam(raw: string): unknown {
+  const s = raw.trim();
+  if (s.toUpperCase() === "NULL") {
+    return null;
+  }
+  if (s.length >= 2 && s[0] === s[s.length - 1] && (s[0] === "'" || s[0] === '"')) {
+    return s.slice(1, -1);
+  }
+  if (/^[+-]?\d+$/.test(s)) {
+    return parseInt(s, 10);
+  }
+  if (/^[+-]?(\d+\.\d*|\.\d+)$/.test(s)) {
+    return parseFloat(s);
+  }
+  return raw;
 }
 
 // ---------------------------------------------------------------------------

@@ -90,6 +90,11 @@
         "icon": "$(plug)"
       },
       {
+        "command": "tsqlFabric.switchWarehouse",
+        "title": "T-SQL Fabric: Switch Warehouse",
+        "icon": "$(arrow-swap)"
+      },
+      {
         "command": "tsqlFabric.checkSetup",
         "title": "T-SQL Fabric: Check Setup"
       },
@@ -313,6 +318,20 @@
               "name": "Debug T-SQL procedure",
               "program": "^\"\\${file}\"",
               "params": {},
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "T-SQL Fabric: debug with prompted parameters",
+            "description": "Ask for a parameter value at launch (input variable).",
+            "body": {
+              "type": "tsql-fabric",
+              "request": "launch",
+              "name": "Debug with @year",
+              "program": "^\"\\${file}\"",
+              "params": {
+                "@year": "^\"\\${input:year}\""
+              },
               "stopOnEntry": true
             }
           },
