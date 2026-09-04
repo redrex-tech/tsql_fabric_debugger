@@ -243,7 +243,9 @@ default — `commit=True` is an explicit decision. Corollaries worth knowing:
 ```python
 TSQLDebugger(
     sql_file=None,            # path to the .sql — OR —
-    sql_text=None,            # the T-SQL as a string
+    sql_text=None,            # the T-SQL as a string — OR —
+    proc_name=None,           # "schema.proc": fetches the DEPLOYED source from
+                              #   the warehouse (OBJECT_DEFINITION; no schema = dbo)
     params=None,              # {"@year": 2015} — test values for parameters
     server=None,              # SQL endpoint; falls back to $FABRIC_TSQL_SERVER
     database=None,            # warehouse name; falls back to $FABRIC_TSQL_DATABASE
@@ -380,7 +382,8 @@ Lifecycle:
 
 | Function | Behavior |
 |---|---|
-| `run_procedure(sql_file/sql_text, params, server, database, commit=False, save_csv=None, **kwargs)` | Construct, `run_all()`, `close()` in a try/finally, optionally save the CSV. `**kwargs` forward to the constructor (`log_level`, `step_timeout`, ...). |
+| `run_procedure(sql_file/sql_text/proc_name, params, server, database, commit=False, save_csv=None, **kwargs)` | Construct, `run_all()`, `close()` in a try/finally, optionally save the CSV. `**kwargs` forward to the constructor (`log_level`, `step_timeout`, ...). |
+| `fetch_source(proc_name, server, database)` | The deployed source of a procedure, straight from the warehouse (`OBJECT_DEFINITION` on a short-lived session). Raises `ValueError` when the object is missing or `VIEW DEFINITION` is denied. |
 | `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
 | `connect(server, database, autocommit=True)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |

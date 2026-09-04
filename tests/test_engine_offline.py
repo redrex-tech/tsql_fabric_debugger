@@ -167,6 +167,49 @@ def test_show_error_without_error_returns_none(fake_session):
     dbg.close()
 
 
+def test_proc_name_fetches_deployed_source(fake_session):
+    # proc_name= fetches the source via OBJECT_DEFINITION and debugs it like sql_text
+    fake_session.define("dbo.simple", SIMPLE)
+    dbg = TSQLDebugger(proc_name="dbo.simple", params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(updates={"@OUT": 5})
+    fake_session.turn(updates={"@OUT": 6})
+    dbg.run_all()
+    assert dbg._env["@OUT"] == 6
+    dbg.close()
+
+
+def test_proc_name_missing_object_raises(fake_session):
+    with pytest.raises(ValueError, match="VIEW DEFINITION|not available"):
+        TSQLDebugger(proc_name="dbo.nao_existe", server="s", database="d",
+                     echo=lambda *_: None)
+
+
+def test_source_params_are_mutually_exclusive(fake_session):
+    with pytest.raises(ValueError, match="only one"):
+        TSQLDebugger(sql_text=SIMPLE, proc_name="dbo.p", server="s", database="d",
+                     echo=lambda *_: None)
+
+
+def test_fetch_source_is_public(fake_session):
+    from tsql_fabric_debugger import fetch_source
+    fake_session.define("dbo.simple", SIMPLE)
+    assert fetch_source("dbo.simple", "s", "d") == SIMPLE
+    with pytest.raises(ValueError):
+        fetch_source("dbo.nao_existe", "s", "d")
+
+
+def test_run_procedure_accepts_proc_name(fake_session):
+    from tsql_fabric_debugger import run_procedure
+    fake_session.define("dbo.simple", SIMPLE)
+    fake_session.turn(updates={"@OUT": 5})
+    fake_session.turn(updates={"@OUT": 6})
+    log = run_procedure(proc_name="dbo.simple", params={"@n": 5},
+                        server="s", database="d", echo=lambda *_: None)
+    rows = log.to_dict("records") if hasattr(log, "to_dict") else log
+    assert all(r["status"] == "SUCCESS" for r in rows)
+
+
 def test_fatal_connection_error_is_not_swallowed(monkeypatch):
     import tsql_fabric_debugger.engine as eng
 
