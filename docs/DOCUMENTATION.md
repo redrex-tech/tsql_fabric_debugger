@@ -251,12 +251,17 @@ TSQLDebugger(
     database=None,            # warehouse name; falls back to $FABRIC_TSQL_DATABASE
     autocommit=False,         # True = every step persists immediately (warned)
     log_level="simple",       # "full" = whole commands, values, batch on error
-    stop_on_error=True,       # stop the sequential run on an unhandled error
+    stop_on_error=True,       # False: continue past errors; "any": run_all(),
+                              #   run_until() and step_out() also pause on
+                              #   CATCH-handled errors
     preview_chars=500,        # command truncation in the log
     max_loop_iterations=1000, # step_into guard for WHILE loops
     step_timeout=None,        # seconds per step (None = unlimited)
     lock_timeout=None,        # seconds to wait for a lock, then fail (anti-hang)
     max_result_rows=50,       # rows kept per procedure-produced result set
+    offload_threshold=200_000,# strings bigger than this live server-side
+    history_batches=None,     # keep batch text for the last N steps (bounds
+                              #   memory on long into=True loops; None = keep all)
     echo=print,               # console sink — pass any callable
 )
 ```
@@ -303,7 +308,11 @@ accents just work.
 tsql-debug FILE.sql [--server S] [--database D]
            [--param @NAME=VALUE]...    # quote the value ('00123') to force string
            [--commit] [--csv FILE] [--log-level simple|full]
-           [--step-timeout SECONDS] [--version]
+           [--step-timeout SECONDS]    # fail a slow step instead of waiting forever
+           [--lock-timeout SECONDS]    # fail a lock-blocked step fast (error 1222)
+           [--version]
+
+tsql-debug --kill-orphans [--min-idle SECONDS]   # janitor mode: no FILE
 ```
 
 Unquoted `--param` values infer types strictly: integers without leading
@@ -313,6 +322,13 @@ zeros, decimals like `1.5` — never scientific notation, `nan` or `inf`;
 own CATCH handled it), `2` usage/file error. A file without a
 `CREATE PROCEDURE` falls back to loose-script mode with a warning
 (`--param`/`--log-level` don't apply there; `--commit` does).
+
+`--kill-orphans` runs the janitor instead of a file (see
+`kill_orphan_sessions`): it KILLs library-tagged sessions left sleeping with
+an open transaction, idle at least `--min-idle` seconds (default 900), whose
+locks would block other sessions. A polite `SIGTERM` to a running
+`tsql-debug`/`tsql-fabric-dap` already rolls its session back — the janitor
+is for processes killed with `SIGKILL` or a crashed host.
 
 ## 4. API reference
 
@@ -327,7 +343,8 @@ Navigation:
 | `list_steps()` | Print the numbered step plan without executing. `*` marks the cursor; indentation marks sub-steps from `step_into()`. Numbers change after an expansion — re-list before using them. |
 | `step()` | Run the next step ("step over": a whole `IF`/`WHILE` at once) and advance the cursor. Returns the log entry — on failure, the *error* entry, after emulating the CATCH. |
 | `step_into()` | Enter the next step when it is an `IF`/`WHILE` (see §2.6); otherwise identical to `step()`. |
-| `run_all(into=False)` | Run to the end, or until an unhandled error. Returns `log_df()`. `into=True` expands every IF/WHILE the `step_into()` way — each branch taken and each loop iteration becomes its own logged step. |
+| `step_out()` | Finish the current context and stop one level up: the remaining sub-steps of an expanded block (a WHILE stops at its re-evaluation), or the whole active child debugger (OUTPUTs collected). |
+| `run_all(into=False)` | Run to the end, or until an unhandled error (`stop_on_error="any"` in the constructor also pauses on CATCH-handled errors, after the CATCH emulation). Returns `log_df()`. `into=True` expands every IF/WHILE the `step_into()` way — each branch taken and each loop iteration becomes its own logged step. |
 | `run_until(target \| line=n)` | Run up to a step inclusive — the breakpoint idiom. `target` may be a step **number**, a **text** fragment (`run_until("MAX(SEQREC)")`) or `line=<n>`. |
 | `find_step(contains=... \| line=...)` | Return a step number by a text fragment of its command or by its file line — instead of hand-writing `next(i for i, s in enumerate(...))`. |
 | `jump_to(target \| line=n)` | Move the cursor to a step without executing anything before it. `target` may be a step **number**, a **text** fragment (`jump_to("@year = 2013")`) or `line=<n>`. |
@@ -350,7 +367,7 @@ Watches and breakpoints:
 |---|---|
 | `watch(expr, name=None)` | Track a T-SQL expression after every step — it is appended to each capture batch (e.g. `"(SELECT COUNT(*) FROM stg.t)"`). Values echo per step and are returned by `watches()`. A watch that references a dropped object fails the next step — `unwatch()` it. |
 | `unwatch(name=None)` | Remove one watch, or all of them. |
-| `break_at(line, condition=None)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables. `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
+| `break_at(line, condition=None, hits=None, once=False)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables; `hits=N` fires from the Nth pass with the condition true (the loop-iteration counter), `once=True` removes the breakpoint after it fires. `breaks()` returns `{line: {"condition", "hits", "once", "count"}}` (0.2.x returned `{line: condition}`). `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
 | `clear_breaks(line=None)` / `breaks()` | Remove/inspect breakpoints. |
 
 Nested EXEC:
@@ -370,6 +387,9 @@ Inspection:
 | `show_error()` | `show_detail()` of that entry — the one-call idiom after a failed `run_all()`. Prints a note and returns `None` if nothing failed. |
 | `last_results(step_no=None)` | Result sets the procedure itself produced in that entry, as DataFrames (`df.attrs["truncated"]` marks the `max_result_rows` cut). |
 | `set_log_level(level)` | Switch `"simple"`/`"full"` mid-debug. |
+| `eval(expr)` | One-shot server-side evaluation of a T-SQL expression with the CURRENT variables (`eval("@a * @b")`). Logged as an `eval` entry; a failing expression reports and returns None (data effects of prior steps roll back, variables survive). |
+| `stack()` | The current frame stack, outermost first: procedures in the nested-EXEC chain plus the expanded-block frames of the cursor (loop iteration included). `*` marks the active frame. |
+| `log_at(line, expr=None)` / `clear_logpoints()` / `logpoints()` | Logpoints: echo when a FILE line executes — the expression's server-side value (`?? logpoint_l<line> = ...`) or a passage marker — without stopping on a match. One per line. The expression runs inside the step's batch: one that fails server-side fails the step, exactly like a watch. |
 
 Lifecycle:
 
@@ -384,18 +404,47 @@ Lifecycle:
 |---|---|
 | `run_procedure(sql_file/sql_text/proc_name, params, server, database, commit=False, save_csv=None, **kwargs)` | Construct, `run_all()`, `close()` in a try/finally, optionally save the CSV. `**kwargs` forward to the constructor (`log_level`, `step_timeout`, ...). |
 | `fetch_source(proc_name, server, database)` | The deployed source of a procedure, straight from the warehouse (`OBJECT_DEFINITION` on a short-lived session). Raises `ValueError` when the object is missing or `VIEW DEFINITION` is denied. |
-| `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
-| `connect(server, database, autocommit=True)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
+| `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False, lock_timeout=None)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
+| `connect(server, database, autocommit=True, lock_timeout=None)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
+| `kill_orphan_sessions(server, database, min_idle_seconds=900)` | KILL library-tagged sessions left sleeping with an open transaction (a debugger process killed without close()), whose locks block `OBJECT_DEFINITION`/DDL for everyone. Also `tsql-debug --kill-orphans`. CAUTION: an interactively paused debug looks like an orphan — raise the threshold on shared warehouses. |
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
-| `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |
+| `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `duration_s`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |
 | `diff_logs(log_a, log_b)` | Align two execution logs by (line, kind) and report only the divergences — different status/rows/variables, and steps present on one side only. |
 | `parser.read_sql_file(path)` | The multi-encoding file reader. |
 
 The lower layers (`scanner.scan`, `parser.split_steps`, ...) are importable
 and stable enough to build tooling on, but the supported public surface is
 the list above.
+
+### IDE integration — Debug Adapter Protocol (DAP)
+
+`tsql-fabric-dap` (a console script installed with the package) speaks the
+Debug Adapter Protocol over stdio, so any DAP client — VS Code with a generic
+DAP bridge extension, nvim-dap, ... — can debug a `.sql` procedure visually:
+gutter breakpoints (condition and hit-count included — `hitCondition` `N`, `=N`,
+`==N`, `>=N` fire from the Nth pass on, `>N` from the N+1th), step over/into/out, the variables
+pane, evaluation and an exception breakpoint filter for CATCH-handled errors
+(`stop_on_error="any"`). Breakpoints and exception filters sent before the
+launch (the standard client order) are queued and applied at launch.
+
+Launch arguments: `program` (path to the `.sql`) or `procName` (deployed
+procedure), `params`, `server`, `database`, `stopOnEntry`, plus the engine
+pass-throughs `maxLoopIterations`, `historyBatches`, `logLevel`,
+`stepTimeout`, `lockTimeout`.
+
+Safety and limits: one launch = one debugger = one warehouse session; the
+adapter never commits — disconnect (or the client going away) rolls back.
+**Hover** evaluation answers only for plain `@variables`, from captured state
+— it never executes on the server (a failing expression would roll back the
+transaction's data effects); the debug console (REPL) does execute, with
+`eval()` semantics. The adapter is synchronous: while a `continue` runs on
+the server no other request is processed (there is no `pause`). Line
+breakpoints apply to the launched source only — a child debugger entered via
+stepIn on an EXEC has its own source text. See the module docstring of
+`tsql_fabric_debugger/dap.py` for a `launch.json` example.
+
 
 ## 5. Usage: local machine
 

@@ -19,6 +19,53 @@ pytestmark = pytest.mark.integration
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "demo_proc.sql").read_text(encoding="utf-8")
 
+
+def _deploy(ddl):
+    """Create a procedure and RELEASE the schema lock before returning.
+
+    On Fabric the session that runs CREATE PROCEDURE keeps a schema lock on
+    the object until it closes — a debugger reading OBJECT_DEFINITION from
+    another session would block on it. Creating on a short-lived connection
+    that closes immediately releases the lock, so step_into() can fetch the
+    source right away.
+    """
+    from tsql_fabric_debugger.connection import connect as _c
+    conn = _c(autocommit=True, lock_timeout=60)
+    try:
+        conn.cursor().execute(ddl)
+    finally:
+        conn.close()
+
+
+def _drop(name):
+    from tsql_fabric_debugger.connection import connect as _c
+    conn = _c(autocommit=True, lock_timeout=60)
+    try:
+        conn.cursor().execute(f"DROP PROCEDURE {name}")
+    finally:
+        conn.close()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _reap_orphan_state():
+    """A previously killed run leaves a session holding schema locks — and the
+    test procedures it created — behind; either would fail/hang this suite.
+    Reap both before starting (min_idle=0: this is a dedicated test run)."""
+    from tsql_fabric_debugger.connection import connect as _c
+    from tsql_fabric_debugger.connection import kill_orphan_sessions
+    kill_orphan_sessions(min_idle_seconds=0, echo=lambda *_: None)
+    conn = _c(autocommit=True)
+    cur = conn.cursor()
+    cur.execute("SELECT SCHEMA_NAME(schema_id) + '.' + name FROM sys.procedures "
+                "WHERE name LIKE 'tsqldbg_%' OR name LIKE 'p_parent%'")
+    for (name,) in cur.fetchall():
+        try:
+            cur.execute(f"DROP PROCEDURE {name};")
+        except Exception:
+            pass
+    conn.close()
+    yield
+
 if not (os.environ.get("FABRIC_TSQL_SERVER") and os.environ.get("FABRIC_TSQL_DATABASE")):
     pytest.skip("FABRIC_TSQL_SERVER/FABRIC_TSQL_DATABASE not set", allow_module_level=True)
 
@@ -435,11 +482,8 @@ def test_nested_exec_step_into_end_to_end():
     # unique name per run: a leftover lock from a killed previous run must
     # never block this test (schema locks are per object name)
     child_name = f"dbo.tsqldbg_child_{uuid.uuid4().hex[:8]}"
-    admin = _connect(autocommit=True)
-    admin_cur = admin.cursor()
-    admin_cur.execute(
-        f"CREATE PROCEDURE {child_name} "
-        "@x INT, @doubled INT OUTPUT AS BEGIN SET @doubled = @x * 2; END")
+    _deploy(f"CREATE PROCEDURE {child_name} "
+            "@x INT, @doubled INT OUTPUT AS BEGIN SET @doubled = @x * 2; END")
     try:
         parent_src = f"""
 CREATE PROCEDURE dbo.p_parent @n INT, @res INT OUTPUT AS
@@ -451,8 +495,10 @@ END;
 """
         # the with-block guarantees close() even on a failing assert — otherwise
         # the finally's DROP would deadlock against our own open transaction
+        # lock_timeout: an orphaned schema lock must FAIL this test fast,
+        # never hang it (see kill_orphan_sessions)
         with TSQLDebugger(sql_text=parent_src, params={"@n": 21},
-                          echo=lambda *_: None) as dbg:
+                          echo=lambda *_: None, lock_timeout=60) as dbg:
             dbg.step()                      # SET @res = 0
             child = dbg.step_into()         # enter the EXEC
             assert child is not None and child is not dbg
@@ -470,20 +516,15 @@ END;
         assert res == 43                    # 21*2 copied back, then +1
         assert len(exec_entries) == 1 and exec_entries[0]["status"] == "SUCCESS"
     finally:
-        admin_cur.execute(f"DROP PROCEDURE {child_name}")
-        admin.close()
+        _drop(child_name)
 
 
 def test_child_unhandled_error_reaches_the_parent_catch():
     import uuid
-    from tsql_fabric_debugger.connection import connect as _connect
 
     boom_name = f"dbo.tsqldbg_boom_{uuid.uuid4().hex[:8]}"
-    admin = _connect(autocommit=True)
-    admin_cur = admin.cursor()
-    admin_cur.execute(
-        f"CREATE PROCEDURE {boom_name} @x INT AS "
-        "BEGIN SELECT @x = 1 / 0; END")
+    _deploy(f"CREATE PROCEDURE {boom_name} @x INT AS "
+            "BEGIN SELECT @x = 1 / 0; END")
     try:
         parent_src = f"""
 CREATE PROCEDURE dbo.p_parent2 @caught NVARCHAR(400) OUTPUT, @after INT OUTPUT AS
@@ -498,7 +539,7 @@ BEGIN
 END;
 """
         with TSQLDebugger(sql_text=parent_src, params={},
-                          echo=lambda *_: None) as dbg:
+                          echo=lambda *_: None, lock_timeout=60) as dbg:
             child = dbg.step_into()      # enter the EXEC (first step of the parent)
             child.run_all()              # child fails, no CATCH of its own
             dbg.run_all()                # parent collects: its CATCH must run
@@ -508,8 +549,7 @@ END;
         assert "Divide by zero" in (env["@CAUGHT"] or "")   # parent CATCH emulated
         assert env["@AFTER"] is None                        # rest of parent TRY skipped
     finally:
-        admin_cur.execute(f"DROP PROCEDURE {boom_name}")
-        admin.close()
+        _drop(boom_name)
 
 
 def test_breakpoint_on_the_block_header_line_stops():
@@ -539,3 +579,147 @@ def test_lock_timeout_is_applied_to_the_session():
     value = cur.fetchone()[0]
     conn.close()
     assert value == 5000            # seconds -> ms, persisted on the session
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0 features, live against the warehouse
+# ---------------------------------------------------------------------------
+FATPROC = """
+CREATE PROCEDURE dbo.fatorial_it @n INT, @fat BIGINT OUTPUT AS
+BEGIN
+    DECLARE @i INT = 1;
+    SET @fat = 1;
+    WHILE @i <= @n
+    BEGIN
+        SET @fat = @fat * @i;
+        SET @i = @i + 1;
+    END;
+    SET @fat = @fat + 0;
+END;
+"""
+
+
+def test_step_out_eval_stack_and_logpoint_live():
+    lines = []
+    dbg = TSQLDebugger(sql_text=FATPROC, params={"@n": 4},
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(8, "@fat")                       # loop body line: logpoint
+    dbg.run_until(2)                            # DECLARE @i, SET @fat = 1
+    dbg.step_into()                             # enter the WHILE (iteration 1)
+    frames = dbg.stack()
+    assert frames[0]["blocks"] and "WHILE" in frames[0]["blocks"][0]
+    assert dbg.eval("@fat * 10") == 10          # server-side, current vars
+    entry = dbg.step_out()                      # finish iteration 1
+    assert entry is not None
+    dbg.run_all(into=True)                      # remaining iterations expanded
+    assert dbg._env["@FAT"] == 24               # 4! = 24
+    assert any("?? logpoint_l8" in l for l in lines)
+    dbg.close()
+
+
+def test_hit_count_breakpoint_and_stop_on_error_any_live():
+    dbg = TSQLDebugger(sql_text=FATPROC, params={"@n": 6}, echo=lambda *_: None)
+    dbg.break_at(8, hits=3)                     # 3rd loop pass
+    dbg.run_all()
+    assert dbg._env["@I"] == 3                  # two iterations done, paused on 3rd
+    dbg.clear_breaks()
+    dbg.run_all()
+    assert dbg._env["@FAT"] == 720              # 6! = 720
+    dbg.close()
+
+    caught = """
+CREATE PROCEDURE dbo.p_any @r INT OUTPUT, @c NVARCHAR(200) OUTPUT AS
+BEGIN
+    BEGIN TRY
+        SET @r = 1 / 0;
+    END TRY
+    BEGIN CATCH
+        SET @c = ERROR_MESSAGE();
+    END CATCH
+    SET @r = 9;
+END;
+"""
+    dbg = TSQLDebugger(sql_text=caught, params={}, echo=lambda *_: None,
+                       stop_on_error="any")
+    dbg.run_all()
+    assert not dbg._finished                    # paused on the handled error
+    assert dbg.last_error() is not None
+    assert dbg._env["@R"] is None               # SET @r = 9 not yet run
+    dbg.run_all()
+    assert dbg._env["@R"] == 9
+    dbg.close()
+
+
+def test_dap_session_live(tmp_path):
+    import io
+    import json as _json
+    from tsql_fabric_debugger.dap import DapServer
+
+    sql = tmp_path / "proc.sql"
+    sql.write_text(FATPROC, encoding="utf-8")
+
+    def frame(payload):
+        data = _json.dumps(payload).encode()
+        return b"Content-Length: %d\r\n\r\n%s" % (len(data), data)
+
+    reqs = b"".join(frame({"seq": i, "type": "request", "command": c,
+                           "arguments": a})
+                    for i, (c, a) in enumerate([
+        ("initialize", {}),
+        ("setBreakpoints", {"source": {"path": str(sql)},
+                            "breakpoints": [{"line": 8, "hitCondition": "2"}]}),
+        ("configurationDone", {}),
+        ("launch", {"program": str(sql), "params": {"@n": 3},
+                    "server": os.environ["FABRIC_TSQL_SERVER"],
+                    "database": os.environ["FABRIC_TSQL_DATABASE"],
+                    "stopOnEntry": False}),
+        ("stackTrace", {"threadId": 1}),
+        ("variables", {"variablesReference": 1}),
+        ("evaluate", {"expression": "@fat + 100", "context": "repl"}),
+        ("continue", {"threadId": 1}),      # hits again on pass 3 (>= semantics)
+        ("continue", {"threadId": 1}),      # runs to the end
+        ("disconnect", {}),
+    ], start=1))
+    rout = io.BytesIO()
+    DapServer(io.BytesIO(reqs), rout).serve()
+    rout.seek(0)
+    messages = []
+    while True:
+        line = rout.readline()
+        if not line:
+            break
+        length = int(line.split(b":")[1])
+        rout.readline()
+        messages.append(_json.loads(rout.read(length)))
+    stops = [m["body"]["reason"] for m in messages
+             if m.get("type") == "event" and m.get("event") == "stopped"]
+    assert "breakpoint" in stops                # hit #2 of the loop body line
+    ev = next(m for m in messages if m.get("type") == "response"
+              and m.get("command") == "evaluate")
+    assert ev["success"] and ev["body"]["result"] == "101"   # @fat=1 at pause
+    assert any(m.get("event") == "terminated" for m in messages
+               if m.get("type") == "event")
+
+
+def test_kill_orphan_sessions_live():
+    from tsql_fabric_debugger.connection import connect as _connect
+    from tsql_fabric_debugger.connection import kill_orphan_sessions
+
+    # forge an "orphan": a library-tagged session left sleeping with an open
+    # transaction (exactly what a killed debugger process leaves behind)
+    orphan = _connect(autocommit=False)
+    cur = orphan.cursor()
+    cur.execute("SELECT 1;")
+    cur.fetchall()
+
+    msgs = []
+    killed = kill_orphan_sessions(min_idle_seconds=0, echo=msgs.append)
+    assert killed, f"no orphan found/killed: {msgs}"
+    # the server killed it: using the connection now fails
+    import pyodbc
+    try:
+        cur.execute("SELECT 1;")
+        cur.fetchall()
+        raise AssertionError("orphan session survived the KILL")
+    except pyodbc.Error:
+        pass

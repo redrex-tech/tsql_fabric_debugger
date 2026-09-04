@@ -54,7 +54,8 @@ def main(argv=None):
                "ERROR (even when the procedure's own CATCH handled it); "
                "2 = usage or file error.",
     )
-    ap.add_argument("sql_file", help=".sql file with the CREATE PROCEDURE (or a loose script)")
+    ap.add_argument("sql_file", nargs="?",
+                    help=".sql file with the CREATE PROCEDURE (or a loose script)")
     ap.add_argument("--server", help="Warehouse SQL endpoint (or env FABRIC_TSQL_SERVER)")
     ap.add_argument("--database", help="Warehouse name (or env FABRIC_TSQL_DATABASE)")
     ap.add_argument("--param", action="append", type=_parse_param, default=[],
@@ -67,10 +68,33 @@ def main(argv=None):
     ap.add_argument("--log-level", choices=["simple", "full"], default="simple")
     ap.add_argument("--step-timeout", type=int, metavar="SECONDS",
                     help="per-step query timeout")
+    ap.add_argument("--kill-orphans", action="store_true",
+                    help="instead of running a file: KILL leftover debugger "
+                         "sessions (sleeping, open transaction, idle 15+ min) "
+                         "whose locks block other sessions — combine with "
+                         "--min-idle to change the threshold")
+    ap.add_argument("--min-idle", type=int, default=900, metavar="SECONDS",
+                    help="idle threshold for --kill-orphans (default 900)")
     ap.add_argument("--lock-timeout", type=int, metavar="SECONDS",
                     help="fail a lock-blocked step fast instead of hanging")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args(argv)
+
+    if args.kill_orphans:
+        from .connection import kill_orphan_sessions
+        kill_orphan_sessions(args.server, args.database,
+                             min_idle_seconds=args.min_idle)
+        return 0
+    if not args.sql_file:
+        ap.error("sql_file is required (or use --kill-orphans)")
+
+    import signal
+    # a polite kill (SIGTERM) must roll the warehouse session back: SystemExit
+    # lets run_procedure/run_script finally-blocks close the connection
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    except ValueError:
+        pass                     # not the main thread (embedded use)
 
     try:
         sql_text = read_sql_file(args.sql_file)

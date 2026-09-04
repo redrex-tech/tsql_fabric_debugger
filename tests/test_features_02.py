@@ -43,9 +43,9 @@ def test_breakpoint_registry():
     dbg = _dbg()
     dbg.break_at(4)
     dbg.break_at(5, "@n = 2")
-    assert dbg.breaks() == {4: None, 5: "@n = 2"}
+    assert {ln: bp["condition"] for ln, bp in dbg.breaks().items()} == {4: None, 5: "@n = 2"}
     dbg.clear_breaks(4)
-    assert dbg.breaks() == {5: "@n = 2"}
+    assert {ln: bp["condition"] for ln, bp in dbg.breaks().items()} == {5: "@n = 2"}
     dbg.clear_breaks()
     assert dbg.breaks() == {}
 
