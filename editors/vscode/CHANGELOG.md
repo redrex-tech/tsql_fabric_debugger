@@ -2,6 +2,9 @@
 
 ## 0.3.0 — preview
 
+- **Brand logo**: the RedRex T-Rex on a red disc — the extension icon and the
+  Activity Bar icon.
+
 Friendly onboarding — no cryptic endpoints to paste:
 
 - **Connect to Warehouse**: sign in with the Azure CLI and pick your
