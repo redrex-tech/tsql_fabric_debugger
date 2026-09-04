@@ -320,8 +320,9 @@ Navigation:
 | `step()` | Run the next step ("step over": a whole `IF`/`WHILE` at once) and advance the cursor. Returns the log entry — on failure, the *error* entry, after emulating the CATCH. |
 | `step_into()` | Enter the next step when it is an `IF`/`WHILE` (see §2.6); otherwise identical to `step()`. |
 | `run_all()` | Run to the end, or until an unhandled error. Returns `log_df()`. |
-| `run_until(n)` | Run up to step `n` inclusive — the breakpoint idiom. |
-| `jump_to(n)` | Move the cursor to step `n` without executing anything before it (warned: skipped assignments did not run — use `set_var`). |
+| `run_until(target \| line=n)` | Run up to a step inclusive — the breakpoint idiom. `target` may be a step **number**, a **text** fragment (`run_until("MAX(SEQREC)")`) or `line=<n>`. |
+| `find_step(contains=... \| line=...)` | Return a step number by a text fragment of its command or by its file line — instead of hand-writing `next(i for i, s in enumerate(...))`. |
+| `jump_to(target \| line=n)` | Move the cursor to a step without executing anything before it. `target` may be a step **number**, a **text** fragment (`jump_to("@year = 2013")`) or `line=<n>`. |
 | `run_step(n, emulate_catch=False)` | Run *only* step `n` with the current environment; the cursor does not move. |
 
 State:
@@ -377,6 +378,7 @@ Lifecycle:
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
+| `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |
 | `diff_logs(log_a, log_b)` | Align two execution logs by (line, kind) and report only the divergences — different status/rows/variables, and steps present on one side only. |
 | `parser.read_sql_file(path)` | The multi-encoding file reader. |
 

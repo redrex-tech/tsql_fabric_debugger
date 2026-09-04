@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.1 — 2026-09-04
+
+Usability (driven by end-user feedback that the API was too low-level):
+
+- **`summarize(log)`**: a one-glance verdict of a run — "OK, all N steps ran"
+  or "FAILED at step X (line Y): <message>", noting when a CATCH handled it.
+  Returns the facts as a dict (`ok`, `steps`, `error_step`, `error_line`,
+  `error`, `handled`). Pairs with `run_procedure` for a simple "run and tell
+  me what happened" flow, no step-by-step needed.
+- **`find_step(contains=... | line=...)`**: locate a step by a text fragment
+  or a file line, instead of hand-writing
+  `next(i for i, s in enumerate(dbg._steps, 1) if ...)`.
+- **`jump_to` and `run_until` now accept a text fragment or `line=<n>`**, not
+  only a step number — `dbg.run_until("MAX(SEQREC)")`, `dbg.jump_to(line=40)`.
+  Fully backward compatible (a number still works exactly as before).
+
 ## 0.2.0 — 2026-09-03
 
 Productivity release — the items that turn a step executor into a debugger:
