@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -29,7 +29,8 @@
   "activationEvents": [
     "onDebugResolve:tsql-fabric",
     "onDebugDynamicConfigurations:tsql-fabric",
-    "onView:tsqlFabricFiles"
+    "onView:tsqlFabricFiles",
+    "onView:tsqlFabricWorkspace"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -50,19 +51,37 @@
     "views": {
       "tsqlFabric": [
         {
+          "id": "tsqlFabricWorkspace",
+          "name": "Fabric Workspace",
+          "icon": "media/icon.svg"
+        },
+        {
           "id": "tsqlFabricFiles",
-          "name": "Procedures & Notebooks",
+          "name": "Project Files",
           "icon": "media/icon.svg"
         }
       ]
     },
     "viewsWelcome": [
       {
+        "view": "tsqlFabricWorkspace",
+        "contents": "Debug T-SQL stored procedures on Microsoft Fabric — right here.\n\nFirst, connect to a warehouse (you pick it from a list; the endpoint is filled in for you).\n[Connect to Warehouse](command:tsqlFabric.connect)\n[Check setup](command:tsqlFabric.checkSetup)\n\nSign-in uses the Azure CLI (az login). Nothing is written to the warehouse — every debug run ends in ROLLBACK."
+      },
+      {
         "view": "tsqlFabricFiles",
-        "contents": "No .sql or .ipynb files found in this folder.\n[Open a folder](command:vscode.openFolder)\n[Open plugin settings](command:tsqlFabric.openSettings)"
+        "contents": "No .sql or .ipynb files in this folder yet.\n[Open a folder](command:vscode.openFolder)"
       }
     ],
     "commands": [
+      {
+        "command": "tsqlFabric.connect",
+        "title": "T-SQL Fabric: Connect to Warehouse",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "tsqlFabric.checkSetup",
+        "title": "T-SQL Fabric: Check Setup"
+      },
       {
         "command": "tsqlFabric.openSettings",
         "title": "T-SQL Fabric: Open Plugin Settings",
@@ -70,8 +89,18 @@
       },
       {
         "command": "tsqlFabric.refreshFiles",
-        "title": "T-SQL Fabric: Refresh File List",
+        "title": "T-SQL Fabric: Refresh Project Files",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.refreshWorkspace",
+        "title": "T-SQL Fabric: Refresh Fabric Workspace",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.openNotebook",
+        "title": "T-SQL Fabric: Open Notebook in Fabric",
+        "icon": "$(link-external)"
       },
       {
         "command": "tsqlFabric.debugFile",
@@ -82,20 +111,35 @@
     "menus": {
       "view/title": [
         {
-          "command": "tsqlFabric.refreshFiles",
-          "when": "view == tsqlFabricFiles",
+          "command": "tsqlFabric.connect",
+          "when": "view == tsqlFabricWorkspace",
           "group": "navigation@1"
         },
         {
-          "command": "tsqlFabric.openSettings",
-          "when": "view == tsqlFabricFiles",
+          "command": "tsqlFabric.refreshWorkspace",
+          "when": "view == tsqlFabricWorkspace",
           "group": "navigation@2"
+        },
+        {
+          "command": "tsqlFabric.openSettings",
+          "when": "view == tsqlFabricWorkspace",
+          "group": "navigation@3"
+        },
+        {
+          "command": "tsqlFabric.refreshFiles",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
         {
           "command": "tsqlFabric.debugFile",
           "when": "view == tsqlFabricFiles && viewItem == sqlFile",
+          "group": "inline"
+        },
+        {
+          "command": "tsqlFabric.openNotebook",
+          "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
           "group": "inline"
         }
       ]

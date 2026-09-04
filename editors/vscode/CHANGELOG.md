@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 — preview
+
+Friendly onboarding — no cryptic endpoints to paste:
+
+- **Connect to Warehouse**: sign in with the Azure CLI and pick your
+  **workspace → warehouse** from a list; the SQL endpoint and database name are
+  filled in for you. (Status bar shows the connected warehouse.)
+- **Fabric Workspace** view lists the **notebooks your account can see** in the
+  connected workspace — click to open in the Fabric web UI.
+- **Check Setup** command verifies Azure sign-in and that the Python package is
+  importable, with actionable fixes.
+- First-run welcome screens; hitting F5 without a warehouse offers the picker
+  (or manual entry). The **Project Files** view keeps listing local `.sql`/
+  `.ipynb`.
+
+
 ## 0.2.0 — preview
 
 - **Activity Bar view "T-SQL Fabric"** listing the project's `.sql` procedures

@@ -29,15 +29,24 @@ them together and fills in the launch configuration.
 3. A signed-in **Azure CLI** (`az login`) — the library authenticates through
    it (Entra ID). No passwords or tokens are stored.
 
-## Setup
+## First run
 
-Point the extension at your warehouse once, in Settings:
+1. Click the **T-SQL Fabric** icon in the Activity Bar. The **Fabric
+   Workspace** view greets you with **Connect to Warehouse** and **Check
+   setup**.
+2. **Connect to Warehouse** — signs you in via `az login`, then lets you pick
+   your **workspace → warehouse** from a list. The cryptic SQL endpoint and the
+   database name are filled in for you; the connected warehouse shows in the
+   status bar. (Prefer typing them? Set `tsqlFabric.server`/`database` in
+   Settings — the gear button in the view.)
+3. **Check setup** verifies the Azure sign-in and that the Python package is
+   importable, and tells you how to fix whatever is missing.
 
-- `tsqlFabric.server` — your SQL endpoint, e.g.
-  `xxxx.datawarehouse.fabric.microsoft.com`
-- `tsqlFabric.database` — the warehouse name
-- `tsqlFabric.pythonPath` *(optional)* — the interpreter that has the package.
-  Empty reuses the one picked by the Python extension, else `python3` on PATH.
+Once connected, the **Fabric Workspace** view lists the notebooks your account
+can see in that workspace — click one to open it in the Fabric web UI.
+
+`tsqlFabric.pythonPath` *(optional)* — the interpreter that has the package.
+Empty reuses the one picked by the Python extension, else `python3` on PATH.
 
 ## The T-SQL Fabric sidebar
 
