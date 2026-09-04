@@ -27,6 +27,51 @@ def _get_token():
         return AzureCliCredential().get_token(TOKEN_SCOPE).token
 
 
+def kill_orphan_sessions(server: str | None = None, database: str | None = None,
+                         min_idle_seconds: int = 900, echo=print) -> list:
+    """KILL leftover debugger sessions so their locks stop blocking everyone.
+
+    A debugger process that dies without close() (SIGKILL, crashed kernel,
+    killed test run) leaves its warehouse session sleeping with the debug
+    transaction OPEN — schema locks included, which blocks OBJECT_DEFINITION
+    and DDL for every other session until the server notices the dead TCP
+    connection (minutes). This finds sessions tagged by this library
+    (program_name 'tsql-fabric-debugger'), sleeping with an open transaction
+    and idle for at least min_idle_seconds, and KILLs them: the server rolls
+    their transaction back, releasing the locks.
+
+    CAUTION: an interactive debug someone left paused looks exactly like an
+    orphan. The default threshold (15 minutes) is a compromise — raise it on
+    shared warehouses, or only run this when you know no one is mid-debug.
+    Returns the killed session ids.
+    """
+    conn = connect(server, database, autocommit=True)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT session_id FROM sys.dm_exec_sessions "
+            "WHERE program_name = 'tsql-fabric-debugger' "
+            "  AND session_id <> @@SPID AND status = 'sleeping' "
+            "  AND open_transaction_count > 0 "
+            "  AND DATEDIFF(second, COALESCE(last_request_end_time, login_time), "
+            "               SYSUTCDATETIME()) >= ?;", (int(min_idle_seconds),))
+        orphans = [r[0] for r in cur.fetchall()]
+        killed = []
+        for sid in orphans:
+            try:
+                cur.execute(f"KILL {int(sid)};")
+                killed.append(sid)
+                echo(f"orphan debugger session {sid} killed — its transaction "
+                     "was rolled back by the server.")
+            except Exception as exc:
+                echo(f"session {sid} not killed: {exc}")
+        if not orphans:
+            echo("no orphan debugger sessions found.")
+        return killed
+    finally:
+        conn.close()
+
+
 def fetch_source(proc_name: str, server: str | None = None,
                  database: str | None = None) -> str:
     """Fetch the deployed source of a procedure straight from the warehouse.

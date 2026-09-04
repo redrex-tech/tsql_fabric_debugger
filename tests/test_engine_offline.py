@@ -852,3 +852,411 @@ def test_summarize_handled_by_catch():
     info = summarize(log, echo=msgs.append)
     assert not info["ok"] and info["handled"]
     assert any("handled by a CATCH" in m for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0: step_out, eval, stack, stop_on_error="any", hit-count/once, logpoints
+# ---------------------------------------------------------------------------
+LOOPPROC = """
+CREATE PROCEDURE dbo.l @n INT, @i INT OUTPUT AS
+BEGIN
+    SET @i = 0;
+    WHILE @i < @n
+    BEGIN
+        SET @i = @i + 1;
+    END;
+END;
+"""
+
+
+def test_step_out_finishes_the_expanded_block(fake_session):
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(cond=1)                     # IF @n > 0 -> true
+    dbg.step_into()                               # cursor inside the branch
+    assert dbg._steps[dbg._pos]["depth"] == 1
+    fake_session.turn(updates={"@X": 1})          # the branch body
+    entry = dbg.step_out()
+    assert entry is not None and entry["status"] == "SUCCESS"
+    assert dbg._env["@X"] == 1
+    # cursor left the block: end of plan or a depth-0 step
+    assert dbg._pos >= len(dbg._steps) or dbg._steps[dbg._pos]["depth"] == 0
+    dbg.close()
+
+
+def test_step_out_at_top_level_is_a_noop(fake_session):
+    dbg = _dbg(fake_session)
+    assert dbg.step_out() is None
+    assert dbg._pos == 0                          # nothing ran
+    dbg.close()
+
+
+def test_step_out_finishes_an_active_child(fake_session):
+    fake_session.define("dbo.child", CHILD_SRC)
+    dbg = TSQLDebugger(sql_text=PARENT, params={"@n": 21}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg.step_into()                               # enter the EXEC -> child active
+    fake_session.turn(updates={"@DOUBLED": 42})   # child's only step
+    entry = dbg.step_out()                        # finish child + collect
+    assert entry["kind"] == "exec" and entry["status"] == "SUCCESS"
+    assert dbg._env["@RES"] == 42
+    assert dbg._child is None
+    dbg.close()
+
+
+def test_eval_returns_the_value_and_logs(fake_session):
+    dbg = _dbg(fake_session)
+    fake_session.turn(updates={"__eval__": 10})
+    assert dbg.eval("@n * 2") == 10
+    assert "__eval__" not in dbg._env             # no environment pollution
+    assert dbg._log[-1]["kind"] == "eval"
+    dbg.close()
+
+
+def test_eval_failure_reports_and_returns_none(fake_session):
+    dbg = _dbg(fake_session)
+    fake_session.fail("Invalid column name 'nope'")
+    assert dbg.eval("nope") is None
+    assert dbg._log[-1]["status"] == "ERROR"
+    assert not dbg._finished                      # an eval never ends the debug
+    dbg.close()
+
+
+def test_eval_rejects_unbalanced_parentheses(fake_session):
+    dbg = _dbg(fake_session)
+    with pytest.raises(ValueError, match="parentheses"):
+        dbg.eval("(SELECT 1")
+    dbg.close()
+
+
+def test_stack_shows_block_and_child_frames(fake_session):
+    fake_session.define("dbo.child", CHILD_SRC)
+    dbg = TSQLDebugger(sql_text=PARENT, params={"@n": 21}, server="s", database="d",
+                       echo=lambda *_: None)
+    child = dbg.step_into()
+    frames = child.stack()
+    assert [f["procedure"] for f in frames] == ["dbo.parent", "dbo.child"]
+    assert frames[0]["active"] is False and frames[1]["active"] is True
+    dbg.close()
+
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(cond=1)
+    dbg.step_into()
+    frames = dbg.stack()
+    assert len(frames) == 1 and frames[0]["blocks"]
+    assert frames[0]["blocks"][0].startswith("IF @n > 0")
+    dbg.close()
+
+
+def test_stop_on_error_any_pauses_on_handled_error(fake_session):
+    dbg = TSQLDebugger(sql_text=TRY, params={}, server="s", database="d",
+                       echo=lambda *_: None, stop_on_error="any")
+    fake_session.turn(updates={"@R": 1})          # SET @r = 1
+    fake_session.fail("kaboom")                   # SET @r = 2 fails
+    fake_session.turn(updates={"@C": "kaboom"})   # CATCH emulated
+    dbg.run_all()
+    assert not dbg._finished                      # paused, not finished
+    assert dbg.last_error() is not None
+    dbg.run_all()                                 # resumes to the end
+    assert dbg._pos >= len(dbg._steps)
+    dbg.close()
+
+
+def test_stop_on_error_rejects_bad_value(fake_session):
+    with pytest.raises(ValueError, match="stop_on_error"):
+        TSQLDebugger(sql_text=SIMPLE, server="s", database="d",
+                     echo=lambda *_: None, stop_on_error="always")
+
+
+def test_breakpoint_hit_count_stops_on_the_nth_pass(fake_session):
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg.break_at(7, hits=2)                       # the loop body line, 2nd pass
+    fake_session.turn(updates={"@I": 0})          # SET @i = 0
+    fake_session.turn(cond=1)                     # WHILE iter 1
+    fake_session.turn(updates={"@I": 1})          # body iter 1 (hit #1: no stop)
+    fake_session.turn(cond=1)                     # WHILE iter 2
+    dbg.run_all()
+    assert dbg._env["@I"] == 1                    # exactly one iteration ran
+    assert dbg.breaks()[7]["count"] == 2
+    dbg.close()
+
+
+def test_breakpoint_once_removes_itself(fake_session):
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 1}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg.break_at(7, once=True)
+    fake_session.turn(updates={"@I": 0})
+    fake_session.turn(cond=1)
+    dbg.run_all()                                 # stops before the body
+    assert dbg.breaks() == {}                     # fired and removed itself
+    fake_session.turn(updates={"@I": 1})          # body
+    fake_session.turn(cond=0)                     # WHILE ends
+    dbg.run_all()
+    assert dbg._env["@I"] == 1
+    dbg.close()
+
+
+def test_logpoint_prints_without_stopping(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=SIMPLE, params={"@n": 5}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(4, "@n")                           # SET @out = @n line
+    fake_session.turn(updates={"@OUT": 5}, watches={"logpoint_l4": 5})
+    fake_session.turn(updates={"@OUT": 6})
+    dbg.run_all()
+    assert any("?? logpoint_l4 = 5" in l for l in lines)
+    assert dbg._pos >= len(dbg._steps)            # never stopped
+    assert "logpoint_l4" not in dbg._watches      # disarmed after the step
+    dbg.close()
+
+
+def test_logpoint_without_expr_marks_the_passage(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=SIMPLE, params={"@n": 5}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(4)
+    fake_session.turn(updates={"@OUT": 5})
+    dbg.step()
+    assert any("logpoint: reached line 4" in l for l in lines)
+    dbg.close()
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0 review fixes (multi-persona: eng. dados / analista / QA / DBA)
+# ---------------------------------------------------------------------------
+def test_break_at_rejects_non_int_line_and_bad_hits(fake_session):
+    dbg = _dbg(fake_session)
+    with pytest.raises(ValueError, match="int"):
+        dbg.break_at("7")
+    with pytest.raises(ValueError, match="int"):
+        dbg.break_at(7, hits=2.5)
+    dbg.close()
+
+
+def test_expression_validation_blocks_batch_breakers(fake_session):
+    dbg = _dbg(fake_session)
+    for bad in ("1 -- oops", "'abc", "1); SELECT (1", "1; SELECT 2"):
+        with pytest.raises(ValueError):
+            dbg.watch(bad)
+        with pytest.raises(ValueError):
+            dbg.eval(bad)
+        with pytest.raises(ValueError):
+            dbg.log_at(4, bad)
+    dbg.close()
+
+
+def test_watch_cannot_take_the_logpoint_name(fake_session):
+    dbg = _dbg(fake_session)
+    with pytest.raises(ValueError, match="reserved"):
+        dbg.watch("@n", name="logpoint_l4")
+    dbg.close()
+
+
+def test_logpoint_inside_block_fires_via_auto_expand(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 1}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(7, "@i")                            # loop body line
+    fake_session.turn(updates={"@I": 0})           # SET @i = 0
+    fake_session.turn(cond=1)                      # WHILE iter 1
+    fake_session.turn(updates={"@I": 1}, watches={"logpoint_l7": 1})
+    fake_session.turn(cond=0)                      # WHILE ends
+    dbg.run_all()                                  # WITHOUT into=True
+    assert any("?? logpoint_l7 = 1" in l for l in lines)
+    assert dbg._pos >= len(dbg._steps)             # never stopped
+    dbg.close()
+
+
+def test_logpoint_in_break_loop_notices_and_runs_whole(fake_session):
+    loop_break = """
+CREATE PROCEDURE dbo.p @i INT OUTPUT AS
+BEGIN
+    WHILE 1 = 1
+    BEGIN
+        SET @i = 1;
+        BREAK;
+    END;
+END;
+"""
+    lines = []
+    dbg = TSQLDebugger(sql_text=loop_break, params={}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(6, "@i")                            # inside the BREAK loop
+    fake_session.turn(updates={"@I": 1})           # whole loop, one batch
+    dbg.run_all()
+    assert any("cannot fire" in l for l in lines)  # noticed, did NOT stop
+    assert dbg._env["@I"] == 1
+    dbg.close()
+
+
+def test_logpoint_on_header_fires_with_step_into(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(4, "@n")                            # the IF header line
+    fake_session.turn(cond=1, watches={"logpoint_l4": 5})
+    dbg.step_into()
+    assert any("?? logpoint_l4 = 5" in l for l in lines)
+    assert "logpoint_l4" not in dbg._watches
+    dbg.close()
+
+
+def test_logpoint_disarmed_during_catch_emulation(fake_session):
+    dbg = TSQLDebugger(sql_text=TRY, params={}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg.log_at(6, "@r")                            # the failing TRY line (SET @r = 2)
+    fake_session.turn(updates={"@R": 1})           # SET @r = 1
+    fake_session.fail("kaboom")                    # SET @r = 2 fails (logpoint armed)
+    fake_session.turn(updates={"@C": "kaboom"})    # CATCH step
+    dbg.run_all()
+    failing = [b for b in fake_session.executed if "SET @r = 2" in b]
+    catch = [b for b in fake_session.executed if "SET @c" in b]   # rewritten stmt
+    assert failing and any("__watch__logpoint" in b for b in failing)
+    assert catch and not any("__watch__logpoint" in b for b in catch)
+    dbg.close()
+
+
+def test_run_until_honors_stop_on_error_any(fake_session):
+    dbg = TSQLDebugger(sql_text=TRY, params={}, server="s", database="d",
+                       echo=lambda *_: None, stop_on_error="any")
+    fake_session.turn(updates={"@R": 1})
+    fake_session.fail("kaboom")
+    fake_session.turn(updates={"@C": "kaboom"})
+    dbg.run_until(line=7)                          # target past the failing step
+    assert not dbg._finished and dbg.last_error() is not None   # paused
+    dbg.close()
+
+
+def test_step_out_stops_at_breakpoints_inside_the_block(fake_session):
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(updates={"@I": 0})
+    dbg.step()                                     # SET @i = 0
+    fake_session.turn(cond=1)
+    dbg.step_into()                                # inside iteration 1
+    dbg.break_at(7)                                # body line
+    entry = dbg.step_out()                         # must stop AT the breakpoint
+    assert dbg._steps[dbg._pos]["line"] == 7       # cursor before the body
+    assert dbg._env["@I"] == 0                     # body did not run
+    dbg.close()
+
+
+def test_reset_zeroes_breakpoint_hit_counters(fake_session):
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg.break_at(7, hits=2)
+    fake_session.turn(updates={"@I": 0})
+    fake_session.turn(cond=1)
+    fake_session.turn(updates={"@I": 1})
+    fake_session.turn(cond=1)
+    dbg.run_all()                                  # stops on hit #2
+    assert dbg.breaks()[7]["count"] == 2
+    dbg.reset()
+    assert dbg.breaks()[7]["count"] == 0           # replay counts from zero
+    dbg.close()
+
+
+def test_eval_failure_keeps_the_procedure_error_state(fake_session):
+    dbg = _dbg(fake_session)
+    dbg._error_msg, dbg._error_number = "erro original", 123
+    fake_session.fail("eval kaboom")
+    assert dbg.eval("@nope") is None
+    assert dbg._error_msg == "erro original"       # not polluted by the eval
+    assert dbg._error_number == 123
+    dbg.close()
+
+
+def test_broken_breakpoint_condition_pauses_not_crashes(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=SIMPLE, params={"@n": 5}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.break_at(4, "@typo = 1")
+    fake_session.fail("Invalid column name 'typo'")   # the condition eval fails
+    dbg.run_all()                                  # must NOT raise
+    assert any("FAILED to evaluate" in l for l in lines)
+    assert dbg._pos == 0                           # paused before the step
+    dbg.close()
+
+
+def test_max_loop_iterations_pauses_run_all(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 99}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)), max_loop_iterations=1)
+    fake_session.turn(updates={"@I": 0})           # SET @i = 0
+    fake_session.turn(cond=1)                      # iter 1
+    fake_session.turn(updates={"@I": 1})           # body 1
+    fake_session.turn(cond=1)                      # iter 2 -> exceeds max=1
+    dbg.run_all(into=True)
+    assert any("max_loop_iterations" in l and "[BREAK]" in l for l in lines)
+    dbg.close()
+
+
+def test_validate_expr_round2_bypasses(fake_session):
+    dbg = _dbg(fake_session)
+    for bad in ("[foo", '"foo', "'abc''", "1) AS [x], (2"):
+        with pytest.raises(ValueError):
+            dbg.watch(bad)
+    dbg.watch("[a--b]")                            # valid identifier: accepted
+    dbg.close()
+
+
+def test_step_clears_the_breakpoint_pause(fake_session):
+    dbg = _dbg(fake_session)
+    dbg.break_at(5)                                # line of "SET @out = @out + 1"
+    fake_session.turn(updates={"@OUT": 5})
+    dbg.run_all()                                  # pauses BEFORE line 5
+    assert dbg._break_resume is not None
+    fake_session.turn(updates={"@OUT": 6})
+    dbg.step()                                     # manual step past the pause
+    assert dbg._break_resume is None               # stale pause consumed
+    dbg.close()
+
+
+def test_loop_abort_pauses_on_the_auto_expand_path(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=LOOPPROC + "", params={"@n": 99}, server="s",
+                       database="d", echo=lambda m: lines.append(str(m)),
+                       max_loop_iterations=1)
+    dbg.log_at(7, "@i")                            # forces auto-expansion
+    fake_session.turn(updates={"@I": 0})
+    fake_session.turn(cond=1, watches={"logpoint_l7": 0})
+    fake_session.turn(updates={"@I": 1}, watches={"logpoint_l7": 1})
+    fake_session.turn(cond=1)                      # iter 2 -> exceeds max=1
+    dbg.run_all()                                  # into=False: auto-expand path
+    assert any("[BREAK]" in l and "max_loop_iterations" in l for l in lines)
+    dbg.close()
+
+
+def test_dangling_loop_abort_pauses_next_run_all(fake_session):
+    post_loop = LOOPPROC.replace("END;\nEND;", "END;\n    SET @i = @i * 100;\nEND;")
+    lines = []
+    dbg = TSQLDebugger(sql_text=post_loop, params={"@n": 99}, server="s",
+                       database="d", echo=lambda m: lines.append(str(m)),
+                       max_loop_iterations=1)
+    fake_session.turn(updates={"@I": 0})
+    dbg.step()                                     # SET @i = 0
+    fake_session.turn(cond=1)
+    dbg.step_into()                                # iter 1 expanded
+    fake_session.turn(updates={"@I": 1})
+    dbg.step()                                     # body
+    fake_session.turn(cond=1)
+    dbg.step_into()                                # iter 2 -> manual abort
+    assert dbg._loop_aborted
+    dbg.run_all()                                  # must pause BEFORE post-loop
+    assert dbg._env["@I"] == 1                     # SET @i * 100 did NOT run
+    assert any("[BREAK]" in l and "max_loop_iterations" in l for l in lines)
+    dbg.close()
+
+
+def test_run_until_notices_marks_inside_blocks(fake_session):
+    lines = []
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 1}, server="s",
+                       database="d", echo=lambda m: lines.append(str(m)))
+    dbg.log_at(7, "@i")
+    fake_session.turn(updates={"@I": 0})
+    fake_session.turn(updates={"@I": 1})           # loop runs whole under run_until
+    dbg.run_until(line=5)                          # up to the WHILE, inclusive
+    assert any("[NOTICE] run_until runs blocks whole" in l for l in lines)
+    dbg.close()

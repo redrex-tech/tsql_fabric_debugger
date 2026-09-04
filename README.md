@@ -42,6 +42,13 @@ pip install "tsql-fabric-debugger[all]"     # + pandas and sqlparse
 Outside Fabric you need the **ODBC Driver 18 for SQL Server** installed and
 a valid `az login`.
 
+## IDE debugging (DAP)
+
+`tsql-fabric-dap` speaks the Debug Adapter Protocol over stdio: point any DAP
+client (VS Code via a DAP bridge extension, nvim-dap, ...) at it and debug the
+`.sql` visually — gutter breakpoints, step over/into/out, variables pane,
+hover evaluation. Never commits; disconnect rolls back.
+
 ## Interactive usage
 
 ```python
@@ -79,6 +86,7 @@ dbg.list_steps()      # list the numbered steps, without executing
 dbg.step()            # run the next step ("step over": whole IF/WHILE)
 dbg.step_into()       # step into an IF/WHILE: evaluates the condition
                       #   server-side, picks the branch, yields sub-steps
+dbg.step_out()        # finish the current block/child and stop one level up
 dbg.run_all(into=True)   # run to the end the step_into() way: every IF/WHILE
                          #   expanded, each loop iteration its own logged step
 child = dbg.step_into()   # on an `EXEC dbo.child ...` step: fetches the child's
@@ -90,6 +98,8 @@ dbg.run_until(15)     # run up to step 15 (breakpoint)
 dbg.run_until("MAX(SEQREC)")   # ...or up to the step whose command has that text
 dbg.jump_to(line=40)  # ...or position by file line; find_step() returns the number
 dbg.show_vars()       # state of every variable (OUTPUT params included)
+dbg.eval("@a * @b")   # evaluate one T-SQL expression with the CURRENT variables
+dbg.stack()           # where am I? procedures + expanded blocks + iteration
 dbg.sql("SELECT COUNT(*) FROM dbo.movements")   # query on the SAME session
 dbg.jump_to(17)       # move the cursor without running earlier steps
 dbg.set_var("@sqlSrc", "...")                   # build state by hand
@@ -100,7 +110,10 @@ dbg.show_error()      # the step that FAILED, in full — the one-call idiom
                       #   after a failed run_all() (last_error() for the dict)
 dbg.last_results()    # result sets the procedure itself produced
 dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg")   # tracked every step
+dbg.log_at(8, "@fat")               # logpoint: print the value there, never stop
+dbg.clear_logpoints()               # remove one logpoint (by line) or all
 dbg.break_at(42, "@code = 31000")   # run_all() stops there when it's true
+dbg.break_at(8, hits=4)             # ...or from the 4th pass on (once=True: fire once)
 dbg.save_state("st.json")           # variables snapshot (JSON) ...
 dbg.load_state("st.json")           # ... resume tomorrow with jump_to()
 dbg.reset()           # rollback + replay from step 1 on a fresh session
@@ -158,7 +171,7 @@ UTF-16 with BOM (SSMS default) or cp1252.
 | `params` | `{}` | test values for procedure parameters (`{"@year": 2015}`) |
 | `autocommit` | `False` | `True` = every step persists immediately (a warning is echoed; `close()` undoes nothing) |
 | `log_level` | `"simple"` | `"full"` prints whole commands, untruncated variables and the SQL batch on errors |
-| `stop_on_error` | `True` | stop the sequential run on an unhandled error |
+| `stop_on_error` | `True` | stop the sequential run on an unhandled error (`False`: continue past errors; `"any"`: also pause on CATCH-handled errors) |
 | `step_timeout` | `None` | per-step query timeout in seconds (`None` = unlimited) |
 | `lock_timeout` | `None` | seconds to wait for a lock before failing (error 1222) instead of hanging behind another session — the anti-hang for orphaned-transaction locks; does not prevent the orphan, only bounds the wait |
 | `max_result_rows` | `50` | rows captured per result set the procedure produces |
@@ -171,7 +184,7 @@ UTF-16 with BOM (SSMS default) or cp1252.
 ### Log columns
 
 `log_df()` / `--csv` (procedure mode): `step`, `line` (file line), `kind`
-(`stmt`/`declare`/`if_block`/`while_block`/`return`/`cond`/`catch`/`params`/`throw`),
+(`stmt`/`declare`/`if_block`/`while_block`/`cond`/`exec`/`eval`/`return`/`throw`/`params`),
 `status` (`SUCCESS`/`ERROR`/`REGISTERED`), `rows_affected` (only for captured
 steps; `None` otherwise), `duration_s`, `command` (truncated preview),
 `changed_vars` (truncated — `show_detail()` has the full values),

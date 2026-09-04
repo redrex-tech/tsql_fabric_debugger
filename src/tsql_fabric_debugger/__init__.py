@@ -19,9 +19,9 @@ Quick start:
 Batch mode: run_procedure(...). Scripts without CREATE PROCEDURE: run_script(...).
 """
 
-from .connection import connect, fetch_source
+from .connection import connect, fetch_source, kill_orphan_sessions
 from .engine import TSQLDebugger
 from .runner import diff_logs, run_procedure, run_script, summarize
 
-__version__ = "0.2.3"
-__all__ = ["TSQLDebugger", "connect", "fetch_source", "diff_logs", "run_procedure", "run_script", "summarize", "__version__"]
+__version__ = "0.3.0"
+__all__ = ["TSQLDebugger", "connect", "fetch_source", "kill_orphan_sessions", "diff_logs", "run_procedure", "run_script", "summarize", "__version__"]

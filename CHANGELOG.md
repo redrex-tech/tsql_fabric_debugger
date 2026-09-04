@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.0 — 2026-09-04
+
+Debugger parity with mainstream tools (pdb/debugpy, Chrome DevTools), driven
+by a feature-gap analysis:
+
+- **`step_out()`**: finish the current context and stop one level up — the
+  remaining sub-steps of an expanded IF/WHILE (a WHILE stops at its
+  re-evaluation step), or the whole active child debugger (OUTPUTs
+  collected). Honors breakpoints on the way.
+- **`eval(expr)`**: one-shot server-side evaluation of a T-SQL expression
+  with the current variables — the single-use counterpart of `watch()`.
+- **`stack()`**: the frame stack — procedures in the nested-EXEC chain plus
+  the expanded-block frames (loop iteration included).
+- **`stop_on_error="any"`**: `run_all()`/`run_until()`/`step_out()` also
+  pause on errors a CATCH handled (after the CATCH emulation) — the
+  "break on caught exceptions" of DevTools.
+- **`break_at(..., hits=N, once=True)`**: hit-count breakpoints (fire from
+  the Nth pass) and one-shot breakpoints. `breaks()` now returns
+  `{line: {"condition", "hits", "once", "count"}}` (was `{line: condition}`).
+- **Logpoints**: `log_at(line, expr)` echoes a value when a line executes,
+  without ever stopping (`clear_logpoints()`, `logpoints()`). Fires inside
+  auto-expanded blocks and on IF/WHILE headers.
+- **DAP adapter**: `tsql-fabric-dap` speaks the Debug Adapter Protocol over
+  stdio — debug the `.sql` visually from VS Code (via a DAP bridge
+  extension), nvim-dap or any DAP client: gutter/conditional/hit-count
+  breakpoints, step over/into/out, variables pane, hover/REPL evaluation,
+  CATCH-handled-error exception filter. Never commits; disconnect rolls back.
+
+Hardening from a 4-persona review (data engineer, data analyst, QA, DBA):
+expression validation that blocks batch-breaking typos (comments, `;`,
+unbalanced quotes) in watch/eval/logpoint/break conditions; broken breakpoint
+conditions pause instead of crashing; `reset()` zeroes breakpoint hit
+counters; a WHILE hitting `max_loop_iterations` pauses `run_all()` instead of
+silently running post-loop steps on partial state; `eval()` failures no
+longer pollute `ERROR_MESSAGE()`; logpoints are disarmed during CATCH
+emulation.
+
+Robustness against orphaned warehouse sessions (a debugger process killed
+without close() leaves its transaction open, holding locks):
+
+- **`kill_orphan_sessions(server, database, min_idle_seconds=900)`** (and
+  `tsql-debug --kill-orphans [--min-idle N]`): KILL library-tagged sessions
+  sleeping with an open transaction past the idle threshold, so the server
+  rolls them back and releases their locks.
+- The `tsql-debug` and `tsql-fabric-dap` entry points install a SIGTERM
+  handler: a polite kill runs close()+ROLLBACK instead of orphaning the
+  session (SIGKILL still needs the janitor above).
+
+
 ## 0.2.3 — 2026-09-04
 
 Usability (driven by end-user feedback):
