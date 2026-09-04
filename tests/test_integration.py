@@ -248,3 +248,68 @@ def test_return_inside_emulated_catch_ends_the_debug():
     assert env["@R"] == -1
     assert env["@Z"] is None        # code after END CATCH never ran
     assert finished
+
+
+PROC_DEFAULT_THEN_FAIL = """
+CREATE PROCEDURE dbo.p_deffail @d DATETIME2 = SYSUTCDATETIME(), @x INT OUTPUT AS
+BEGIN
+    SELECT @x = 1 / 0;
+END;
+"""
+
+
+def test_error_entry_returned_even_after_pending_defaults():
+    # the lazy first connection logs the defaults entry BEFORE the failing
+    # statement — step() must still return the ERROR entry
+    dbg = TSQLDebugger(sql_text=PROC_DEFAULT_THEN_FAIL, params={}, echo=lambda *_: None)
+    entry = dbg.step()
+    d = dbg._env["@D"]
+    dbg.close()
+    assert entry["status"] == "ERROR"
+    assert "Divide by zero" in entry["error"]
+    assert d is not None                       # the server-side default was applied
+
+
+PROC_SUBSTEP_FAIL = """
+CREATE PROCEDURE dbo.p_subfail @n INT, @a INT OUTPUT, @b INT OUTPUT,
+                               @c NVARCHAR(200) OUTPUT, @z INT OUTPUT AS
+BEGIN
+    BEGIN TRY
+        IF @n = 1
+        BEGIN
+            SET @a = 1;
+            SELECT @a = 1 / 0;
+            SET @b = 1;
+        END;
+        SET @z = 1;
+    END TRY
+    BEGIN CATCH
+        SET @c = ERROR_MESSAGE();
+    END CATCH
+END;
+"""
+
+
+def test_error_in_expanded_substep_routes_through_the_catch():
+    dbg = TSQLDebugger(sql_text=PROC_SUBSTEP_FAIL, params={"@n": 1}, echo=lambda *_: None)
+    while not dbg._finished and dbg._pos < len(dbg._steps):
+        dbg.step_into()
+    env = dbg._env
+    dbg.close()
+    assert env["@A"] == 1                      # sub-step before the failure ran
+    assert "Divide by zero" in (env["@C"] or "")   # the right CATCH was emulated
+    assert env["@B"] is None                   # remaining sub-steps of the TRY skipped
+    assert env["@Z"] is None                   # rest of the TRY skipped too
+
+
+def test_run_step_with_catch_return_does_not_kill_the_session():
+    # a THROW/RETURN inside the CATCH of an ISOLATED run_step must not set
+    # _finished on the sequential debug
+    dbg = TSQLDebugger(sql_text=PROC_RETURN_IN_CATCH, params={}, echo=lambda *_: None)
+    failing = next(i for i, s in enumerate(dbg._steps, start=1)
+                   if "RAISERROR" in s["text"])
+    entry = dbg.run_step(failing, emulate_catch=True)
+    assert entry["status"] == "ERROR"
+    assert not dbg._finished                   # sequential session intact
+    assert dbg._pos == 0                       # cursor untouched
+    dbg.close()

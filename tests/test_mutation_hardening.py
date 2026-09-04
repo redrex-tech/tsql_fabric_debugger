@@ -77,7 +77,7 @@ def test_parse_params_paren_right_after_the_type():
     assert [(p["name"], p["type"], p["default"], p["output"]) for p in params] == [
         ("@a", "INT", None, False),
     ]
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(sql, tokens, i_as)
     assert sql[tokens[i0]["s"]:tokens[i1 - 1]["e"]] == "SET @a = 1;"
 
 
@@ -153,7 +153,7 @@ def test_parse_params_with_header_parens():
         ("@b", "NVARCHAR(10)", None, True),
     ]
     # body located correctly after the AS
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(sql, tokens, i_as)
     body = sql[tokens[i0]["s"]:tokens[i1 - 1]["e"]]
     assert body == "SET @a = 1;"
 
@@ -164,15 +164,16 @@ def _i_as(tokens):
 
 def test_procedure_body_shapes():
     # unclosed BEGIN...END wrapper is still an error
-    tokens = scan("CREATE PROCEDURE p AS BEGIN SELECT 1;")
+    sql = "CREATE PROCEDURE p AS BEGIN SELECT 1;"
+    tokens = scan(sql)
     with pytest.raises(ValueError, match="END of procedure body"):
-        procedure_body(tokens, _i_as(tokens))
+        procedure_body(sql, tokens, _i_as(tokens))
 
     # bare body (no wrapper) is valid T-SQL and must not be rejected
     sql = "CREATE PROCEDURE p AS SET NOCOUNT ON; SELECT 1;"
     tokens = scan(sql)
     i_as = next(i for i, t in enumerate(tokens) if t.get("u") == "AS") + 1
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(sql, tokens, i_as)
     assert sql[tokens[i0]["s"]:tokens[i1 - 1]["e"]] == "SET NOCOUNT ON; SELECT 1;"
 
     # body starting straight at BEGIN TRY: the CATCH must NOT be dropped
@@ -180,7 +181,7 @@ def test_procedure_body_shapes():
            "BEGIN CATCH SET @a = -1; END CATCH")
     tokens = scan(sql)
     i_as = next(i for i, t in enumerate(tokens) if t.get("u") == "AS") + 1
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(sql, tokens, i_as)
     ctx = {"catches": []}
     steps = split_steps(sql, tokens, i0, i1, ctx)
     assert [s["text"] for s in steps] == ["SET @a = 1"]
@@ -193,7 +194,7 @@ def test_procedure_body_shapes():
 def _parse_fixture():
     tokens = scan(FIXTURE)
     _, _, i_as = parse_params(FIXTURE, tokens, find_procedure(tokens))
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(FIXTURE, tokens, i_as)
     ctx = {"catches": []}
     steps = split_steps(FIXTURE, tokens, i0, i1, ctx)
     return tokens, steps, ctx["catches"][0] if ctx["catches"] else [], (i0, i1)

@@ -111,7 +111,7 @@ class TSQLDebugger:
         if i_proc is None:
             raise ValueError("CREATE PROCEDURE not found — use run_script() for loose scripts.")
         self.proc_name, self._param_defs, i_as = parse_params(sql_text, tokens, i_proc)
-        i0, i1 = procedure_body(tokens, i_as)
+        i0, i1 = procedure_body(sql_text, tokens, i_as)
 
         ctx = {"catches": [], "span_ids": {}}
         self._steps = split_steps(sql_text, tokens, i0, i1, ctx)
@@ -204,10 +204,11 @@ class TSQLDebugger:
                 self._exec_batch(f"SELECT {assigns}", [], f"defaults: {assigns}", "params", 0)
         return self._cursor
 
-    def _safe_rollback(self, announce=False):
-        """Rollback that never raises; reports a dead session instead of hiding it."""
+    def _safe_rollback(self, announce=False) -> bool:
+        """Rollback that never raises. Returns True only when it really ran —
+        callers must not announce success otherwise."""
         if self._autocommit or self._conn is None:
-            return
+            return False
         try:
             self._conn.rollback()
             self._rolled_back = True
@@ -215,9 +216,11 @@ class TSQLDebugger:
                 self._echo("[TRANSACTION] error inside a Fabric transaction — ROLLBACK "
                            "executed (data effects of previous steps undone; captured "
                            "VARIABLES keep their values).")
+            return True
         except Exception:
             self._echo("[TRANSACTION] rollback FAILED — the session is likely dead; "
                        "close() and start a new debugger.")
+            return False
 
     def _build_batch(self, stmt_text, stmt_binds, exclude=frozenset(), extra_capture=None):
         """Build the state-preserving batch: DECLARE + re-injection + statement + capture.
@@ -463,12 +466,16 @@ class TSQLDebugger:
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            if len(self._log) == log_before:
-                # nothing was recorded: infrastructure or internal failure —
-                # never swallow it (a swallowed bug looks like a clean finish)
+            # the ERROR entry may not be the first new one: a lazy first
+            # connection logs the pending-defaults entry before the statement
+            error_entry = next((e for e in reversed(self._log[log_before:])
+                                if e["status"] == "ERROR"), None)
+            if error_entry is None:
+                # no SQL error was recorded: infrastructure or internal
+                # failure — never swallow it (a swallowed bug looks like a
+                # clean finish)
                 self._echo(f"[FATAL] failure outside SQL execution: {exc}")
                 raise
-            error_entry = self._log[log_before]
             self._handle_step_error(step, emulate_catch, finalize)
             return error_entry
 
@@ -483,13 +490,16 @@ class TSQLDebugger:
         if catch_steps:
             self._echo(f"[CATCH] error inside TRY #{catch_id + 1} — emulating "
                        f"{len(catch_steps)} step(s) of its CATCH block.")
-            ok = self._emulate_catch(catch_steps)
+            outcome = self._emulate_catch(catch_steps)   # "ok" | "ended" | "failed"
             self._error_msg = self._error_number = self._error_line = None
             if not finalize:
+                # run_step(): the isolated execution must not end the
+                # sequential debug, whatever happened inside the CATCH
                 return
-            if self._finished:      # RETURN or THROW inside the CATCH
+            if outcome == "ended":  # RETURN or THROW inside the CATCH
+                self._finished = True
                 return
-            if ok:
+            if outcome == "ok":
                 # T-SQL semantics: after the CATCH handles the error, execution
                 # CONTINUES after END CATCH — skip everything still inside the
                 # failed TRY, nested TRY blocks included (catch_ids stack)
@@ -512,7 +522,13 @@ class TSQLDebugger:
             self._finished = self._stop_on_error
 
     def _emulate_catch(self, catch_steps):
-        """Run the CATCH steps. Returns False if the CATCH itself failed."""
+        """Run the CATCH steps without touching the debug lifecycle.
+
+        Returns "ok" (CATCH completed), "ended" (RETURN/THROW inside the
+        CATCH — the procedure would end here) or "failed" (the CATCH itself
+        raised). The CALLER decides what that means for _finished, so an
+        isolated run_step() never kills the sequential session.
+        """
         for step in catch_steps:
             first = scan(step["text"])
             if first and is_word(first[0], "THROW"):
@@ -520,19 +536,17 @@ class TSQLDebugger:
                 self._record("throw", step["line"], "SUCCESS",
                              "[CATCH] " + step["text"], started, {}, None)
                 self._echo("      THROW — the original error is re-raised; procedure aborts.")
-                self._finished = True
-                return True
+                return "ended"
             try:
                 _, returned = self._execute_step(step, prefix="[CATCH] ")
             except KeyboardInterrupt:
                 raise
             except Exception:
-                return False
+                return "failed"
             if returned:
                 self._echo("      RETURN inside the CATCH — procedure execution finished.")
-                self._finished = True
-                return True
-        return True
+                return "ended"
+        return "ok"
 
     # -- interactive API ----------------------------------------------------
     def list_steps(self) -> None:
@@ -559,7 +573,13 @@ class TSQLDebugger:
             return None
         current = self._steps[self._pos]
         self._pos += 1
-        return self._run_one(current, emulate_catch=True, finalize=True)
+        try:
+            return self._run_one(current, emulate_catch=True, finalize=True)
+        except BaseException:
+            # _run_one only re-raises on fatal/interrupt — the step did not
+            # complete, so keep the cursor on it for a retry after recovery
+            self._pos -= 1
+            raise
 
     def step_into(self) -> object:
         """Step into the next step when it is an IF/WHILE block.
@@ -590,7 +610,9 @@ class TSQLDebugger:
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            if len(self._log) == log_before or self._log[-1]["status"] != "ERROR":
+            error_entry = next((e for e in reversed(self._log[log_before:])
+                                if e["status"] == "ERROR"), None)
+            if error_entry is None:
                 self._echo(f"[FATAL] failure outside SQL execution: {exc}")
                 raise
             # the condition evaluation failed — same treatment the block
@@ -598,7 +620,7 @@ class TSQLDebugger:
             if self._pos < len(self._steps) and self._steps[self._pos] is step:
                 self._pos += 1
             self._handle_step_error(step, emulate_catch=True, finalize=True)
-            return self._log[log_before]
+            return error_entry
 
     def run_step(self, n: int, emulate_catch: bool = False) -> dict | None:
         """Run ONLY step n (1-based), with the current variable state.
@@ -840,9 +862,17 @@ class TSQLDebugger:
 
         A mid-debug reset of the warehouse state — useful after inspecting
         the damage of a wrong step, or to re-run a phase from clean data.
+        Announces success only when a rollback actually ran.
         """
-        self._safe_rollback()
-        self._echo("ROLLBACK executed — data effects undone; captured variables kept.")
+        if self._autocommit:
+            self._echo("[TRANSACTION] autocommit=True — there is nothing to roll back; "
+                       "every step already persisted.")
+            return
+        if self._conn is None:
+            self._echo("No open session — nothing to roll back.")
+            return
+        if self._safe_rollback():
+            self._echo("ROLLBACK executed — data effects undone; captured variables kept.")
 
     def log_df(self) -> object:
         """Executed-step log as a DataFrame (or a list of dicts without pandas)."""

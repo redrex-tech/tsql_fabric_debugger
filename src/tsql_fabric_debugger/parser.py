@@ -140,13 +140,28 @@ def parse_params(sql, tokens, i):
     return ".".join(name_parts), param_defs, i
 
 
-def procedure_body(tokens, i_after_as):
+def _is_batch_separator(sql, token):
+    """True when a GO token is a real batch separator: alone on its line
+    (optionally followed by a count), exactly as T-SQL tools require —
+    a column alias or identifier spelled `go` never qualifies."""
+    line_start = sql.rfind("\n", 0, token["s"]) + 1
+    if sql[line_start:token["s"]].strip():
+        return False
+    line_end = sql.find("\n", token["e"])
+    if line_end == -1:
+        line_end = len(sql)
+    rest = sql[token["e"]:line_end].strip()
+    return rest == "" or rest.isdigit()
+
+
+def procedure_body(sql, tokens, i_after_as):
     """Locate the procedure body after AS. Returns (i0, i1) — the token span.
 
     Handles the three legal shapes: a BEGIN...END wrapper (common case), a
     body that starts directly with BEGIN TRY (no outer wrapper — the CATCH
     must NOT be dropped), and a bare statement list (`AS SET ...;`). Bare
-    bodies run until a level-0 GO or the end of the tokens.
+    bodies run until a level-0 batch-separator GO (alone on its line) or the
+    end of the tokens.
     """
     n = len(tokens)
     i = i_after_as
@@ -166,7 +181,7 @@ def procedure_body(tokens, i_after_as):
                     depth += 1
                 elif tj["u"] == "END":
                     depth -= 1
-                elif tj["u"] == "GO" and depth <= 0:
+                elif tj["u"] == "GO" and depth <= 0 and _is_batch_separator(sql, tj):
                     return i, j
             j += 1
         return i, n

@@ -12,7 +12,7 @@ import time
 from .connection import connect
 from .engine import TSQLDebugger
 from .parser import read_sql_file, skip_stmt
-from .scanner import scan
+from .scanner import is_word, scan
 
 GO_PATTERN = re.compile(r"^\s*GO\s*\d*\s*$", flags=re.IGNORECASE | re.MULTILINE)
 
@@ -54,6 +54,13 @@ def split_script(sql_text: str) -> list:
     i, n = 0, len(tokens)
     while i < n:
         j = skip_stmt(tokens, i, n)
+        # skip_stmt stops BEFORE a level-0 ELSE (a branch-body rule); in a
+        # loose script the ELSE belongs to the same IF statement — glue the
+        # whole chain back into one batch, or the ELSE branch would run
+        # unconditionally as its own batch
+        while j < n and is_word(tokens[j], "ELSE"):
+            j2 = skip_stmt(tokens, j + 1, n)
+            j = j2 if j2 > j + 1 else j + 1
         if j == i:          # defensive: a stray level-0 ELSE must not loop forever
             i += 1
             continue

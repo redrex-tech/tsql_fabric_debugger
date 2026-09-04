@@ -289,3 +289,35 @@ def test_parse_sql_error_multi_message_and_number():
            "[SQL Server]boom (50000) (SQLExecDirectW)\")")
     msg, num = _parse_sql_error(raw)
     assert msg == "boom" and num == 50000
+
+
+def test_fatal_failure_keeps_the_cursor_on_the_step(monkeypatch):
+    import tsql_fabric_debugger.engine as eng
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(eng, "connect", boom)
+    dbg = TSQLDebugger(sql_text=PROC_TABLEVAR, params={},
+                       server="offline", database="offline", echo=lambda *_: None)
+    dbg.step()                      # DECLARE @t TABLE: no connection needed
+    pos_before = dbg._pos
+    with pytest.raises(RuntimeError):
+        dbg.step()
+    assert dbg._pos == pos_before   # retry lands on the same step
+
+
+def test_rollback_is_truthful_about_what_it_did():
+    messages = []
+    dbg = TSQLDebugger(sql_text=PROC_TABLEVAR, params={}, autocommit=True,
+                       server="offline", database="offline", echo=messages.append)
+    dbg.rollback()
+    assert any("nothing to roll back" in m for m in messages)
+    assert not any("data effects undone" in m for m in messages)
+
+    messages.clear()
+    dbg2 = TSQLDebugger(sql_text=PROC_TABLEVAR, params={},
+                        server="offline", database="offline", echo=messages.append)
+    dbg2.rollback()          # no session opened yet
+    assert any("No open session" in m for m in messages)
+    assert not any("data effects undone" in m for m in messages)

@@ -19,7 +19,7 @@ def _parse():
     tokens = scan(FIXTURE)
     i_proc = find_procedure(tokens)
     name, params, i_as = parse_params(FIXTURE, tokens, i_proc)
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(FIXTURE, tokens, i_as)
     ctx = {"catches": []}
     steps = split_steps(FIXTURE, tokens, i0, i1, ctx)
     return tokens, name, params, (i0, i1), steps, ctx["catches"][0] if ctx["catches"] else []
@@ -126,7 +126,7 @@ def test_nested_try_steps_carry_the_full_catch_stack():
     """
     tokens = scan(sql)
     _, _, i_as = parse_params(sql, tokens, find_procedure(tokens))
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(FIXTURE, tokens, i_as)
     ctx = {"catches": []}
     steps = split_steps(sql, tokens, i0, i1, ctx)
     assert [s["text"] for s in steps] == ["SET @a = 1", "SET @b = 1", "SET @c = 1"]
@@ -147,7 +147,7 @@ def test_transaction_controls_including_dynamic_sql_and_exec():
     """
     tokens = scan(sql)
     _, _, i_as = parse_params(sql, tokens, find_procedure(tokens))
-    i0, i1 = procedure_body(tokens, i_as)
+    i0, i1 = procedure_body(sql, tokens, i_as)
     controls, exec_lines = scan_transaction_controls(sql, tokens, i0, i1)
     assert any("string literal" in desc for desc, _ in controls)   # COMMIT inside N'...'
     assert len(exec_lines) == 2
@@ -161,3 +161,22 @@ def test_read_sql_file_common_encodings(tmp_path):
         p = tmp_path / name
         p.write_bytes(text.encode(encoding))
         assert read_sql_file(p) == text
+
+
+def test_go_as_identifier_does_not_truncate_bare_body():
+    from tsql_fabric_debugger.parser import _is_batch_separator
+    # `go` as a column alias must NOT end a bare body; a real GO line must
+    sql = ("CREATE PROCEDURE p AS\n"
+           "SELECT uf FROM dbo.states go WHERE go.uf = @uf;\n"
+           "SELECT 2;\n"
+           "GO\n"
+           "SELECT N'next object';")
+    tokens = scan(sql)
+    i_as = next(i for i, t in enumerate(tokens) if t.get("u") == "AS") + 1
+    i0, i1 = procedure_body(sql, tokens, i_as)
+    body = sql[tokens[i0]["s"]:tokens[i1 - 1]["e"]]
+    assert "go.uf = @uf" in body and body.endswith("SELECT 2;")
+    assert "next object" not in body
+
+    go_tokens = [t for t in tokens if t.get("u") == "GO"]
+    assert [_is_batch_separator(sql, t) for t in go_tokens] == [False, False, True]
