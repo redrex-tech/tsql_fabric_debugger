@@ -392,6 +392,20 @@ Lifecycle:
 | `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
 | `connect(server, database, autocommit=True)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
+
+### IDE integration — Debug Adapter Protocol (DAP)
+
+`tsql-fabric-dap` (a console script installed with the package) speaks the
+Debug Adapter Protocol over stdio, so any DAP client — VS Code with a generic
+DAP bridge extension, nvim-dap, ... — can debug a `.sql` procedure visually:
+gutter breakpoints (condition and hit-count included), step over/into/out,
+the variables pane, hover/REPL evaluation (`evaluate` maps to `eval()`), and
+an exception breakpoint filter for CATCH-handled errors
+(`stop_on_error="any"`). Launch arguments: `program` (path to the `.sql`) or
+`procName` (deployed procedure), `params`, `server`, `database`,
+`stopOnEntry`. One launch = one debugger = one warehouse session; the adapter
+never commits — disconnect rolls back. See the module docstring of
+`tsql_fabric_debugger/dap.py` for a `launch.json` example.
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
 | `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |

@@ -42,6 +42,13 @@ pip install "tsql-fabric-debugger[all]"     # + pandas and sqlparse
 Outside Fabric you need the **ODBC Driver 18 for SQL Server** installed and
 a valid `az login`.
 
+## IDE debugging (DAP)
+
+`tsql-fabric-dap` speaks the Debug Adapter Protocol over stdio: point any DAP
+client (VS Code via a DAP bridge extension, nvim-dap, ...) at it and debug the
+`.sql` visually — gutter breakpoints, step over/into/out, variables pane,
+hover evaluation. Never commits; disconnect rolls back.
+
 ## Interactive usage
 
 ```python
