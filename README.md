@@ -80,7 +80,15 @@ dbg.run_step(17)      # run ONLY step 17 (does not move the cursor)
 dbg.set_log_level("full")   # full command + SQL batch on errors
 dbg.show_detail()     # last step in full (command + error + batch)
 dbg.last_results()    # result sets the procedure itself produced
+dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg")   # tracked every step
+dbg.break_at(42, "@code = 31000")   # run_all() stops there when it's true
+dbg.save_state("st.json")           # variables snapshot (JSON) ...
+dbg.load_state("st.json")           # ... resume tomorrow with jump_to()
+dbg.reset()           # rollback + replay from step 1 on a fresh session
 dbg.close()           # ROLLBACK and close (commit=True to persist)
+
+from tsql_fabric_debugger import diff_logs
+diff_logs(log_2015, log_2016)       # divergences between two runs
 ```
 
 Each step shows the line in the original file, the variables that changed
@@ -130,6 +138,8 @@ UTF-16 with BOM (SSMS default) or cp1252.
 | `max_result_rows` | `50` | rows captured per result set the procedure produces |
 | `max_loop_iterations` | `1000` | guard for `step_into()` on WHILE loops |
 | `preview_chars` | `500` | command truncation in the log's `command` column |
+| `offload_threshold` | `200_000` | strings above this length are kept in a server-side session table and hydrated per batch (uploaded once per change) instead of re-sent on every step |
+| `history_batches` | `None` | keep the heavy per-step payloads (batch text, result sets) only for the last N entries — ERROR entries always keep everything |
 | `echo` | `print` | console output sink |
 
 ### Log columns

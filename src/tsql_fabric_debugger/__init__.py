@@ -21,7 +21,7 @@ Batch mode: run_procedure(...). Scripts without CREATE PROCEDURE: run_script(...
 
 from .connection import connect
 from .engine import TSQLDebugger
-from .runner import run_procedure, run_script
+from .runner import diff_logs, run_procedure, run_script
 
-__version__ = "0.1.0"
-__all__ = ["TSQLDebugger", "connect", "run_procedure", "run_script", "__version__"]
+__version__ = "0.2.0"
+__all__ = ["TSQLDebugger", "connect", "diff_logs", "run_procedure", "run_script", "__version__"]

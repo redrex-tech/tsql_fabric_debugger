@@ -77,7 +77,9 @@ class TSQLDebugger:
                  server: str | None = None, database: str | None = None, autocommit: bool = False,
                  log_level: str = "simple", stop_on_error: bool = True,
                  preview_chars: int = 500, max_loop_iterations: int = 1000,
-                 step_timeout: int | None = None, max_result_rows: int = 50, echo=print):
+                 step_timeout: int | None = None, max_result_rows: int = 50,
+                 offload_threshold: int = 200_000, history_batches: int | None = None,
+                 echo=print):
         if sql_text is None:
             if sql_file is None:
                 raise ValueError("Provide sql_file or sql_text.")
@@ -92,7 +94,18 @@ class TSQLDebugger:
         self._max_loop_iterations = max_loop_iterations
         self._step_timeout = step_timeout            # seconds per step (None = unlimited)
         self._max_result_rows = max_result_rows      # rows captured per procedure result set
+        self._offload_threshold = offload_threshold  # chars; bigger strings live server-side
+        self._history_batches = history_batches      # keep batch text for the last N entries
         self._echo = echo
+        self._watches = {}        # name -> expression, appended to every capture
+        self._watch_values = {}   # name -> last captured value
+        self._watch_seq = 0
+        self._breaks = {}         # file line -> condition (None = unconditional)
+        self._break_resume = None
+        self._offload_synced = {} # var key -> value currently stored server-side
+        self._state_table_ok = False
+        self._offload_disabled = False
+        self._pruned_upto = 0
         self._conn = None
         self._cursor = None
         self._log = []
@@ -168,6 +181,12 @@ class TSQLDebugger:
         if missing:
             self._echo(f"[WARNING] Parameters without a test value (will stay NULL): {', '.join(missing)}")
 
+        # pristine snapshots for reset(): the step list mutates on step_into
+        # expansions, and the pending defaults are consumed on first connect
+        self._initial_steps = list(self._steps)
+        self._initial_env = dict(self._env)
+        self._initial_pending = list(self._pending_defaults)
+
         self._echo(f"Procedure: {self.proc_name} | {len(self._steps)} steps "
                    f"| {sum(len(c) for c in self._catches)} step(s) in {len(self._catches)} "
                    f"CATCH block(s) | {len(self._vars)} variables")
@@ -212,6 +231,10 @@ class TSQLDebugger:
         try:
             self._conn.rollback()
             self._rolled_back = True
+            # the rollback also undoes the server-side state table used for
+            # offloaded large values — force re-creation on the next batch
+            self._state_table_ok = False
+            self._offload_synced.clear()
             if announce:
                 self._echo("[TRANSACTION] error inside a Fabric transaction — ROLLBACK "
                            "executed (data effects of previous steps undone; captured "
@@ -237,20 +260,66 @@ class TSQLDebugger:
         scalars = [k for k in order if not self._vars[k]["table"]]
         declare = "DECLARE " + ", ".join(f"{self._vars[k]['name']} {self._vars[k]['type']}" for k in outer)
         to_inject = [k for k in outer if k in set(scalars) and self._env[k] is not None]
+        # very large strings live in a server-side session table and are
+        # HYDRATED into the variable instead of re-uploaded on every batch
+        offloaded = [k for k in to_inject if self._is_offloaded(k)]
+        to_inject = [k for k in to_inject if k not in set(offloaded)]
         parts = [declare + ";"] if outer else []
         values = []
         if to_inject:
             parts.append("SELECT " + ", ".join(f"{self._vars[k]['name']} = ?" for k in to_inject) + ";")
             values = [self._env[k] for k in to_inject]
+        for k in offloaded:
+            parts.append(f"SELECT {self._vars[k]['name']} = (SELECT [value] FROM "
+                         f"#tsqldbg_state WHERE [name] = N'{k}');")
         if stmt_text is not None:
             parts.append(stmt_text + "\n;")
         capture = f"SELECT '{_SENTINEL}' AS [{_SENTINEL}], @@ROWCOUNT AS [__rowcount__]"
         if scalars:
             capture += ", " + ", ".join(f"{self._vars[k]['name']} AS [{k}]" for k in scalars)
+        for wname, wexpr in self._watches.items():
+            capture += f", ({wexpr}) AS [__watch__{wname}]"
         if extra_capture:
             capture += ", " + extra_capture
         parts.append(capture + ";")
         return "\n".join(parts), values + stmt_binds
+
+    def _is_offloaded(self, key):
+        value = self._env.get(key)
+        return (not self._offload_disabled
+                and isinstance(value, str) and len(value) > self._offload_threshold)
+
+    def _sync_offloaded(self, cur, exclude=frozenset()):
+        """Push changed large values to the server-side state table (once per
+        change, instead of once per step). Falls back to plain parameter
+        injection if the endpoint rejects session temp tables."""
+        keys = [k for k in self._vars
+                if k not in exclude and not self._vars[k]["table"] and self._is_offloaded(k)]
+        stale = [k for k in keys if self._offload_synced.get(k) != self._env[k]]
+        if not stale:
+            return
+        try:
+            import pyodbc
+            if not self._state_table_ok:
+                cur.execute("CREATE TABLE #tsqldbg_state ([name] VARCHAR(200) NOT NULL, "
+                            "[value] NVARCHAR(MAX));")
+                self._state_table_ok = True
+                self._offload_synced.clear()
+            for k in stale:
+                cur.setinputsizes([(pyodbc.SQL_WVARCHAR, 0, 0)])
+                cur.execute(f"DELETE FROM #tsqldbg_state WHERE [name] = N'{k}'; "
+                            f"INSERT INTO #tsqldbg_state ([name], [value]) VALUES (N'{k}', ?);",
+                            (self._env[k],))
+                cur.setinputsizes(None)
+                while cur.nextset():
+                    pass
+                self._offload_synced[k] = self._env[k]
+        except Exception as exc:
+            self._offload_disabled = True
+            self._state_table_ok = False
+            self._echo("[NOTICE] large-value offload unavailable on this endpoint "
+                       f"({_parse_sql_error(str(exc))[0]}) — falling back to per-step "
+                       "parameter injection.")
 
     def _exec_batch(self, stmt_text, stmt_binds, text, kind, line,
                     exclude=frozenset(), extra_capture=None, update_rowcount=True,
@@ -264,6 +333,7 @@ class TSQLDebugger:
                      + f"SELECT '{_SENTINEL}' AS [{_SENTINEL}], @@ROWCOUNT AS [__rowcount__];")
             values = list(stmt_binds)
         else:
+            self._sync_offloaded(cur, exclude)
             batch, values = self._build_batch(stmt_text, stmt_binds, exclude, extra_capture)
         started = time.time()
         changed = {}
@@ -291,6 +361,8 @@ class TSQLDebugger:
                         if col == "__rowcount__":
                             if update_rowcount:
                                 self._env["@@ROWCOUNT"] = val
+                        elif col.startswith("__watch__"):
+                            self._watch_values[col[len("__watch__"):]] = val
                         elif col != _SENTINEL:
                             self._env[col] = val
                     changed = {self._vars[k]["name"]: self._env[k]
@@ -312,6 +384,9 @@ class TSQLDebugger:
             entry = self._record(kind, line, "SUCCESS", text, started, changed, None,
                                  batch=batch, resultsets=resultsets, captured=captured,
                                  rows_affected=rows_affected)
+            if captured and self._watches and kind not in ("cond", "params"):
+                for wname in self._watches:
+                    self._echo(f"      ?? {wname} = {_shorten(self._watch_values.get(wname))}")
         except KeyboardInterrupt:
             # pyodbc does not abort the server-side statement on SIGINT —
             # cancel it explicitly, then leave the session in a clean state
@@ -329,6 +404,9 @@ class TSQLDebugger:
             entry = self._record(kind, line, "ERROR", text, started, {}, self._error_msg,
                                  batch=batch, resultsets=resultsets, captured=False,
                                  rows_affected=None, raw_error=raw)
+            if self._watches:
+                self._echo("      Hint: watch expressions run inside every batch — if the "
+                           "error points at one of them, unwatch() it and retry.")
             self._safe_rollback(announce=not self._autocommit)
             raise
         return entry
@@ -353,6 +431,17 @@ class TSQLDebugger:
         self._details[entry["step"]] = {"text": text, "batch": batch,
                                         "resultsets": resultsets or [], "captured": captured,
                                         "changed": dict(changed), "raw_error": raw_error}
+        if self._history_batches is not None:
+            # bound memory on long sessions: drop the heavy payloads of old
+            # SUCCESS entries (ERROR entries keep everything for diagnosis)
+            cutoff = entry["step"] - self._history_batches
+            while self._pruned_upto < cutoff:
+                self._pruned_upto += 1
+                old = self._details.get(self._pruned_upto)
+                if old is not None and self._log[self._pruned_upto - 1]["status"] != "ERROR":
+                    old["batch"] = None
+                    old["resultsets"] = []
+                    old["changed"] = {}
         symbol = {"SUCCESS": "ok", "REGISTERED": "reg"}.get(status, "ERR")
         full = self._log_level == "full"
         if full:
@@ -663,6 +752,129 @@ class TSQLDebugger:
         self._env[key] = value
         self._echo(f"{name} = {_shorten(value)}")
 
+    # -- watches ------------------------------------------------------------
+    def watch(self, expr: str, name: str | None = None) -> str:
+        """Track a T-SQL expression after every step, without typing sql().
+
+        Example: dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg_rows").
+        The expression is appended to every capture batch — if it references
+        a missing object, the NEXT step fails with that error (unwatch() it).
+        Returns the watch name.
+        """
+        if not expr or not expr.strip():
+            raise ValueError("Empty watch expression.")
+        toks = scan(expr)
+        if sum(1 for t in toks if t.get("u") == "(") != sum(1 for t in toks if t.get("u") == ")"):
+            raise ValueError("Unbalanced parentheses in watch expression.")
+        if name is None:
+            self._watch_seq += 1
+            name = f"w{self._watch_seq}"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError("Watch names must be simple identifiers.")
+        self._watches[name] = expr
+        self._echo(f"watch {name}: {expr}")
+        return name
+
+    def unwatch(self, name: str | None = None) -> None:
+        """Remove one watch by name, or all of them when called without arguments."""
+        if name is None:
+            self._watches.clear()
+            self._watch_values.clear()
+            self._echo("All watches removed.")
+            return
+        self._watches.pop(name, None)
+        self._watch_values.pop(name, None)
+        self._echo(f"watch {name} removed.")
+
+    def watches(self) -> dict:
+        """Last captured value of every watch: {name: value}."""
+        return dict(self._watch_values)
+
+    # -- breakpoints --------------------------------------------------------
+    def break_at(self, line: int, condition: str | None = None) -> None:
+        """Stop run_all() BEFORE executing any step at this FILE line.
+
+        File lines are stable across step_into() expansions (unlike step
+        numbers). An optional T-SQL condition is evaluated server-side with
+        the current variables: dbg.break_at(42, "@code = 31000").
+        """
+        self._breaks[line] = condition
+        self._echo(f"breakpoint at line {line}"
+                   + (f" when {condition}" if condition else ""))
+
+    def clear_breaks(self, line: int | None = None) -> None:
+        """Remove the breakpoint at one line, or all of them."""
+        if line is None:
+            self._breaks.clear()
+            self._echo("All breakpoints removed.")
+        else:
+            self._breaks.pop(line, None)
+            self._echo(f"breakpoint at line {line} removed.")
+
+    def breaks(self) -> dict:
+        """Registered breakpoints: {line: condition | None}."""
+        return dict(self._breaks)
+
+    # -- state snapshots ----------------------------------------------------
+    def save_state(self, path: str | None = None) -> dict:
+        """Serialize the current variable state (JSON-safe) — pair with
+        load_state() + jump_to() to resume tomorrow without replaying steps."""
+        payload = {"procedure": self.proc_name,
+                   "vars": {k: _encode_value(v) for k, v in self._env.items()}}
+        if path:
+            import json
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=1)
+            self._echo(f"State saved to: {path}")
+        return payload
+
+    def load_state(self, source) -> None:
+        """Restore variables from save_state() output (a dict or a file path)."""
+        import json
+        if isinstance(source, str):
+            with open(source, encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = source
+        if data.get("procedure") != self.proc_name:
+            self._echo(f"[WARNING] state was saved from {data.get('procedure')!r}, "
+                       f"this debugger runs {self.proc_name!r}.")
+        restored = 0
+        for key, encoded in data.get("vars", {}).items():
+            if key == "@@ROWCOUNT" or key in self._vars:
+                self._env[key] = _decode_value(encoded)
+                restored += 1
+            else:
+                self._echo(f"[WARNING] unknown variable in state, skipped: {key}")
+        self._echo(f"{restored} variable(s) restored.")
+
+    # -- replay -------------------------------------------------------------
+    def reset(self) -> None:
+        """Discard the session and replay from the start.
+
+        Rolls back and closes the current connection, restores the pristine
+        step plan (undoing step_into expansions), the initial variable values
+        (params + defaults) and an empty log. Watches and breakpoints are
+        kept. The next step() opens a fresh session.
+        """
+        self.close(commit=False)
+        self._steps = list(self._initial_steps)
+        self._env = dict(self._initial_env)
+        self._pending_defaults = list(self._initial_pending)
+        self._pos = 0
+        self._finished = False
+        self._log = []
+        self._details = {}
+        self._pruned_upto = 0
+        self._error_msg = self._error_number = self._error_line = None
+        self._rolled_back = False
+        self._warned_post_rollback = False
+        self._break_resume = None
+        self._watch_values.clear()
+        self._offload_synced.clear()
+        self._state_table_ok = False
+        self._echo("Session reset — replay starts from step 1 on a fresh connection.")
+
     def set_log_level(self, level: str) -> None:
         """Change the log level mid-debug: 'simple' or 'full'."""
         if level.lower() not in ("simple", "full"):
@@ -782,6 +994,15 @@ class TSQLDebugger:
         result = self._eval_condition(" ".join(self._span_text(branch["cond"]).split()),
                                       step["line"])
         del self._steps[self._pos]
+        # prune the PREVIOUS iteration's executed sub-steps: a long loop must
+        # not grow the step list unboundedly (the log keeps the history)
+        loop_key = step["ti"]
+        prune_from = self._pos
+        while prune_from > 0 and self._steps[prune_from - 1].get("loop_key") == loop_key:
+            prune_from -= 1
+        if prune_from < self._pos:
+            del self._steps[prune_from:self._pos]
+            self._pos = prune_from
         if not result:
             self._echo(f"WHILE condition is false — loop ended after {iteration - 1} iteration(s).")
             return None
@@ -789,6 +1010,8 @@ class TSQLDebugger:
             self._echo(f"[ABORTED] WHILE exceeded max_loop_iterations={self._max_loop_iterations}.")
             return None
         subs = self._sub_steps(branch["body"], step)
+        for sub in subs:
+            sub["loop_key"] = loop_key
         next_round = dict(step)
         next_round["iteration"] = iteration + 1
         self._steps[self._pos:self._pos] = subs + [next_round]
@@ -797,8 +1020,34 @@ class TSQLDebugger:
         return subs
 
     def run_all(self) -> object:
-        """Run to the end (or until an error, with the CATCH emulated)."""
+        """Run to the end — or until an error (CATCH emulated) or a breakpoint.
+
+        Breakpoints (break_at) stop BEFORE the matching step executes; calling
+        run_all() again resumes past the one it stopped at.
+        """
         while not self._finished and self._pos < len(self._steps):
+            step = self._steps[self._pos]
+            if (self._breaks and step["kind"] in ("if_block", "while_block")
+                    and self._break_resume != self._pos):
+                # a breakpoint INSIDE a block only exists as a step after the
+                # block is expanded — auto step_into blocks that contain one
+                end_line = self._sql.count("\n", 0, step["e"]) + 1
+                if any(step["line"] <= bl <= end_line for bl in self._breaks):
+                    self.step_into()
+                    continue
+            if self._breaks and self._break_resume != self._pos:
+                condition = self._breaks.get(step["line"], "__no_break__")
+                if condition != "__no_break__":
+                    hit = True if condition is None else \
+                        self._eval_condition(condition, step["line"])
+                    if hit:
+                        self._break_resume = self._pos
+                        self._echo(f"[BREAK] stopped BEFORE line {step['line']} "
+                                   f"(step {self._pos + 1})"
+                                   + (f" — condition {condition} is true" if condition else "")
+                                   + ". step()/run_all() to continue.")
+                        return self.log_df()
+            self._break_resume = None
             self.step()
         return self.log_df()
 
@@ -906,6 +1155,42 @@ class TSQLDebugger:
                 self._conn = None
                 self._cursor = None
         return self.log_df()
+
+
+def _encode_value(value):
+    """JSON-safe encoding for the T-SQL types that cross the pyodbc boundary."""
+    import base64
+    import datetime
+    import decimal
+    if isinstance(value, datetime.datetime):
+        return {"__dt__": value.isoformat()}
+    if isinstance(value, datetime.date):
+        return {"__d__": value.isoformat()}
+    if isinstance(value, datetime.time):
+        return {"__t__": value.isoformat()}
+    if isinstance(value, decimal.Decimal):
+        return {"__dec__": str(value)}
+    if isinstance(value, (bytes, bytearray)):
+        return {"__b64__": base64.b64encode(bytes(value)).decode("ascii")}
+    return value
+
+
+def _decode_value(encoded):
+    import base64
+    import datetime
+    import decimal
+    if isinstance(encoded, dict):
+        if "__dt__" in encoded:
+            return datetime.datetime.fromisoformat(encoded["__dt__"])
+        if "__d__" in encoded:
+            return datetime.date.fromisoformat(encoded["__d__"])
+        if "__t__" in encoded:
+            return datetime.time.fromisoformat(encoded["__t__"])
+        if "__dec__" in encoded:
+            return decimal.Decimal(encoded["__dec__"])
+        if "__b64__" in encoded:
+            return base64.b64decode(encoded["__b64__"])
+    return encoded
 
 
 def _shorten(value, limit=80):

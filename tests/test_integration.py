@@ -313,3 +313,116 @@ def test_run_step_with_catch_return_does_not_kill_the_session():
     assert not dbg._finished                   # sequential session intact
     assert dbg._pos == 0                       # cursor untouched
     dbg.close()
+
+
+PROC_LOOP = """
+CREATE PROCEDURE dbo.p_loop @total INT OUTPUT, @i INT OUTPUT AS
+BEGIN
+    SET @i = 0;
+    SET @total = 0;
+    WHILE @i < 5
+    BEGIN
+        SET @i = @i + 1;
+        SET @total = @total + @i;
+    END;
+END;
+"""
+
+
+def test_conditional_breakpoint_and_watch_in_a_loop():
+    dbg = TSQLDebugger(sql_text=PROC_LOOP, params={}, echo=lambda *_: None)
+    dbg.watch("@i * 100", "i_x100")
+    dbg.break_at(8, "@i = 3")        # file line of "SET @i = @i + 1"
+    dbg.run_all()                    # auto-expands the WHILE (breakpoint inside)
+    assert not dbg._finished
+    assert dbg._env["@I"] == 3       # stopped BEFORE the 4th increment
+    assert dbg.watches()["i_x100"] == 300
+    dbg.clear_breaks()
+    dbg.run_all()
+    total = dbg._env["@TOTAL"]
+    dbg.close()
+    assert total == 15               # loop completed correctly after resume
+
+
+def test_while_step_list_is_pruned_between_iterations():
+    dbg = TSQLDebugger(sql_text=PROC_LOOP, params={}, echo=lambda *_: None)
+    dbg.run_until(2)
+    sizes = []
+    while not dbg._finished and dbg._pos < len(dbg._steps):
+        dbg.step_into()
+        sizes.append(len(dbg._steps))
+    dbg.close()
+    assert dbg._env["@TOTAL"] == 15
+    assert max(sizes) <= len(dbg._initial_steps) + 4   # bounded, not growing per iteration
+
+
+def test_save_state_load_state_and_jump_resume(tmp_path):
+    dbg = TSQLDebugger(sql_text=PROC_LOOP, params={}, echo=lambda *_: None)
+    dbg.run_until(2)                 # @i=0, @total=0 set
+    dbg._env["@I"] = 4               # pretend we got far
+    path = str(tmp_path / "st.json")
+    dbg.save_state(path)
+    dbg.close()
+
+    dbg2 = TSQLDebugger(sql_text=PROC_LOOP, params={}, echo=lambda *_: None)
+    dbg2.load_state(path)
+    assert dbg2._env["@I"] == 4 and dbg2._env["@TOTAL"] == 0
+    dbg2.jump_to(3)                  # straight to the WHILE
+    dbg2.run_all()
+    total = dbg2._env["@TOTAL"]
+    dbg2.close()
+    assert total == 5                # only iteration @i=5 ran: 0 + 5
+
+
+def test_reset_replays_from_scratch_on_same_object():
+    dbg = TSQLDebugger(sql_text=PROC_LOOP, params={}, echo=lambda *_: None)
+    dbg.run_all()
+    assert dbg._env["@TOTAL"] == 15
+    dbg.reset()
+    assert dbg._env["@TOTAL"] is None and dbg._log == []
+    dbg.run_all()
+    total = dbg._env["@TOTAL"]
+    dbg.close()
+    assert total == 15               # full replay on the same object
+
+
+PROC_BIG = """
+CREATE PROCEDURE dbo.p_big @big NVARCHAR(MAX) OUTPUT, @len1 INT OUTPUT,
+                           @len2 INT OUTPUT AS
+BEGIN
+    SET @big = @big + N'-tail';
+    SET @len1 = LEN(@big);
+    SET @len2 = LEN(@big);
+END;
+"""
+
+
+def test_offloaded_large_value_round_trip():
+    big = "α" * 5000                 # unicode, above the tiny test threshold
+    dbg = TSQLDebugger(sql_text=PROC_BIG, params={"@big": big},
+                       offload_threshold=1000, echo=lambda *_: None)
+    dbg.run_all()
+    env = dbg._env
+    synced = dict(dbg._offload_synced)
+    dbg.close()
+    assert env["@BIG"] == big + "-tail"
+    assert env["@LEN1"] == 5005 and env["@LEN2"] == 5005
+    assert synced.get("@BIG") == big + "-tail"   # server copy re-synced after change
+
+
+PROC_NO_SEMI = """
+CREATE PROCEDURE dbo.p_nosemi @a INT OUTPUT, @b INT OUTPUT AS
+BEGIN
+    SET @a = 1
+    SET @b = @a + 1
+END;
+"""
+
+
+def test_semicolonless_procedure_debugs_statement_by_statement():
+    dbg = TSQLDebugger(sql_text=PROC_NO_SEMI, params={}, echo=lambda *_: None)
+    assert len(dbg._steps) == 2      # split on the starter keyword, not one giant step
+    dbg.run_all()
+    env = dbg._env
+    dbg.close()
+    assert env["@A"] == 1 and env["@B"] == 2

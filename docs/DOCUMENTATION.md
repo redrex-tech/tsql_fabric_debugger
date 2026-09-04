@@ -301,7 +301,18 @@ State:
 | `show_vars()` | Print and return every variable's current value (OUTPUT params included; table variables appear with a sentinel string). |
 | `set_var(name, value)` | Manually set a variable (rejects table variables). The value is re-injected from the next batch on. |
 | `sql(query)` | Ad-hoc query **on the same session** — sees uncommitted state. Capped at 10,000 rows; on failure the transaction is rolled back and the error re-raised. |
-| `rollback()` | Undo all data effects so far, keep the session and the captured variables — a mid-debug reset of warehouse state. |
+| `rollback()` | Undo all data effects so far, keep the session and the captured variables. Truthful: refuses under autocommit and reports a dead session. |
+| `save_state(path=None)` / `load_state(source)` | Snapshot/restore the variable environment as JSON (datetime, Decimal and bytes round-trip). Pair with `jump_to()` to resume a long debug another day without replaying the steps. |
+| `reset()` | Roll back, close, restore the pristine step plan (undoing expansions) and the initial parameter values, clear the log — the next step() replays from step 1 on a fresh session. Watches and breakpoints survive. |
+
+Watches and breakpoints:
+
+| Method | Behavior |
+|---|---|
+| `watch(expr, name=None)` | Track a T-SQL expression after every step — it is appended to each capture batch (e.g. `"(SELECT COUNT(*) FROM stg.t)"`). Values echo per step and are returned by `watches()`. A watch that references a dropped object fails the next step — `unwatch()` it. |
+| `unwatch(name=None)` | Remove one watch, or all of them. |
+| `break_at(line, condition=None)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables. `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
+| `clear_breaks(line=None)` / `breaks()` | Remove/inspect breakpoints. |
 
 Inspection:
 
@@ -329,6 +340,7 @@ Lifecycle:
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
+| `diff_logs(log_a, log_b)` | Align two execution logs by (line, kind) and report only the divergences — different status/rows/variables, and steps present on one side only. |
 | `parser.read_sql_file(path)` | The multi-encoding file reader. |
 
 The lower layers (`scanner.scan`, `parser.split_steps`, ...) are importable
@@ -525,8 +537,9 @@ Documented limits (see also the README):
   survive — subsequent steps carry `post_rollback=True` and a warning.
 - `ERROR_SEVERITY()`/`ERROR_STATE()` in an emulated CATCH return 16/1;
   `ERROR_LINE()` returns the *file* line of the failing step.
-- Statement-level stepping requires `;` terminators (T-SQL best practice);
-  an unterminated run of statements becomes one bigger step.
+- `;`-less legacy T-SQL is supported: statements also split on the next
+  statement-starting keyword at level 0 (INSERT..SELECT, UPDATE..SET and
+  WITH..consumer stay whole; MERGE still requires its `;`, as T-SQL does).
 
 Common issues:
 

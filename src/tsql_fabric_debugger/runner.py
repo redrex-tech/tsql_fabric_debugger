@@ -11,8 +11,8 @@ import time
 
 from .connection import connect
 from .engine import TSQLDebugger
-from .parser import read_sql_file, skip_stmt
-from .scanner import is_word, scan
+from .parser import parse_conditional, read_sql_file, skip_stmt
+from .scanner import scan
 
 GO_PATTERN = re.compile(r"^\s*GO\s*\d*\s*$", flags=re.IGNORECASE | re.MULTILINE)
 
@@ -53,15 +53,14 @@ def split_script(sql_text: str) -> list:
     parts = []
     i, n = 0, len(tokens)
     while i < n:
-        j = skip_stmt(tokens, i, n)
-        # skip_stmt stops BEFORE a level-0 ELSE (a branch-body rule); in a
-        # loose script the ELSE belongs to the same IF statement — glue the
-        # whole chain back into one batch, or the ELSE branch would run
-        # unconditionally as its own batch
-        while j < n and is_word(tokens[j], "ELSE"):
-            j2 = skip_stmt(tokens, j + 1, n)
-            j = j2 if j2 > j + 1 else j + 1
-        if j == i:          # defensive: a stray level-0 ELSE must not loop forever
+        t = tokens[i]
+        if t["k"] == "w" and t["u"] in ("IF", "WHILE"):
+            # a whole IF/ELSE chain (or WHILE) is ONE batch — splitting it
+            # would run the ELSE branch unconditionally
+            j, _, _ = parse_conditional(tokens, i, n)
+        else:
+            j = skip_stmt(tokens, i, n)
+        if j == i:          # defensive: a stray level-0 token must not loop forever
             i += 1
             continue
         segment = sql_text[tokens[i]["s"]:tokens[j - 1]["e"]].strip()
@@ -141,3 +140,60 @@ def run_script(sql_file=None, sql_text=None, server=None, database=None,
         return pd.DataFrame(log)
     except ImportError:
         return log
+
+
+def diff_logs(log_a, log_b):
+    """Compare two execution logs (before/after a fix, @year=2015 vs 2016...).
+
+    Entries are aligned by (line, kind) sequence; the result lists only the
+    divergences: steps present on one side only, and aligned steps whose
+    status, rows_affected or changed_vars differ. Returns a DataFrame (or a
+    list of dicts without pandas).
+    """
+    import difflib
+
+    def records(log):
+        return log.to_dict("records") if hasattr(log, "to_dict") else list(log)
+
+    ra, rb = records(log_a), records(log_b)
+    ka = [(r.get("line"), r.get("kind")) for r in ra]
+    kb = [(r.get("line"), r.get("kind")) for r in rb]
+    out = []
+
+    def row(change, a=None, b=None):
+        src = a or b
+        out.append({
+            "change": change,
+            "line": src.get("line"),
+            "kind": src.get("kind"),
+            "command": src.get("command"),
+            "status_a": a.get("status") if a else None,
+            "status_b": b.get("status") if b else None,
+            "rows_a": a.get("rows_affected") if a else None,
+            "rows_b": b.get("rows_affected") if b else None,
+            "changed_vars_a": a.get("changed_vars") if a else None,
+            "changed_vars_b": b.get("changed_vars") if b else None,
+            "duration_a": a.get("duration_s") if a else None,
+            "duration_b": b.get("duration_s") if b else None,
+            "error_a": a.get("error") if a else None,
+            "error_b": b.get("error") if b else None,
+        })
+
+    matcher = difflib.SequenceMatcher(None, ka, kb, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for a, b in zip(ra[i1:i2], rb[j1:j2]):
+                if (a.get("status") != b.get("status")
+                        or a.get("rows_affected") != b.get("rows_affected")
+                        or a.get("changed_vars") != b.get("changed_vars")):
+                    row("diverged", a, b)
+        else:
+            for a in ra[i1:i2]:
+                row("only_in_a", a=a)
+            for b in rb[j1:j2]:
+                row("only_in_b", b=b)
+    try:
+        import pandas as pd
+        return pd.DataFrame(out)
+    except ImportError:
+        return out

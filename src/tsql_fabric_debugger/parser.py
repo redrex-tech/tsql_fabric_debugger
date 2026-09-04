@@ -200,29 +200,59 @@ def procedure_body(sql, tokens, i_after_as):
     raise ValueError("END of procedure body not found.")
 
 
-def skip_stmt(tokens, i, i1):
-    """Advance past the level-0 ';' (parens and BEGIN/CASE/END tracked).
+# mid-statement keywords that BELONG to the current statement even at level 0
+# (INSERT ... SELECT, UPDATE ... SET, WITH cte AS (...) SELECT ...)
+_CONTINUATIONS = {
+    "INSERT": {"SELECT", "EXEC", "EXECUTE", "WITH"},
+    "UPDATE": {"SET"},
+    "WITH": {"SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"},
+}
 
-    Also stops right BEFORE a level-0 ELSE (returning its index): in
-    `IF x SET a = 1 ELSE SET a = 2` there is no ';' before the ELSE, and
-    without this stop the first branch body would swallow the whole ELSE.
-    A CASE's ELSE never triggers this — CASE raises the block counter.
+
+def skip_stmt(tokens, i, i1):
+    """Advance past the end of one statement.
+
+    A statement ends at a level-0 ';' (parens and BEGIN/CASE/END tracked),
+    right BEFORE a level-0 ELSE (so `IF x SET a = 1 ELSE ...` never swallows
+    the ELSE), or — for legacy ';'-less T-SQL — right before the next
+    statement-starting keyword at level 0. Continuations that legally appear
+    mid-statement (INSERT..SELECT, UPDATE..SET, WITH..consumer) are
+    respected, and MERGE never auto-splits: T-SQL itself requires its ';'.
+    ';'-terminated code behaves exactly as before.
     """
     parens = block = 0
+    start = i
+    head = None
+    used_continuations = set()
     while i < i1:
         t = tokens[i]
+        w = t["u"] if t["k"] == "w" else None
         if is_punct(t, "("):
             parens += 1
         elif is_punct(t, ")"):
             parens -= 1
-        elif t["k"] == "w" and (is_word(t, "CASE") or is_block_begin(tokens, i, i1)):
-            block += 1
-        elif is_word(t, "END"):
-            block -= 1
-        elif is_word(t, "ELSE") and parens == 0 and block <= 0:
-            return i
-        elif is_punct(t, ";") and parens == 0 and block <= 0:
-            return i + 1
+        elif parens == 0 and block <= 0:
+            if is_punct(t, ";"):
+                return i + 1
+            if w == "ELSE":
+                return i
+            if w in STMT_START and i > start and head != "MERGE":
+                allowed = _CONTINUATIONS.get(head, ())
+                if w in allowed and w not in used_continuations:
+                    used_continuations.add(w)
+                    if head == "WITH":
+                        # the CTE's consumer takes over as the statement head
+                        head = w
+                        used_continuations = set()
+                else:
+                    return i
+        if w is not None:
+            if w == "CASE" or is_block_begin(tokens, i, i1):
+                block += 1
+            elif w == "END":
+                block -= 1
+            if head is None:
+                head = w
         i += 1
     return i1
 

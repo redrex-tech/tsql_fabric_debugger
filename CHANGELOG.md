@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.0 — 2026-09-03
+
+Productivity release — the items that turn a step executor into a debugger:
+
+- **Breakpoints**: `break_at(line, condition=None)` stops `run_all()` BEFORE
+  the matching step; file lines are stable across expansions, conditions run
+  server-side with the current variables, and `run_all()` auto-expands
+  IF/WHILE blocks that contain a breakpoint. `clear_breaks()`, `breaks()`.
+- **Watches**: `watch(expr, name)` appends expressions to every capture
+  batch — values echo after each step and via `watches()`. `unwatch()`.
+- **State snapshots**: `save_state(path)` / `load_state(source)` serialize
+  the variable environment (datetime/Decimal/bytes-safe JSON) — pair with
+  `jump_to()` to resume a session another day.
+- **Replay**: `reset()` rolls back, restores the pristine step plan and the
+  initial parameter values, and replays from step 1 on a fresh connection.
+- **`;`-less T-SQL**: statements now also split on the next statement-starting
+  keyword at level 0, with legal mid-statement continuations respected
+  (INSERT..SELECT, UPDATE..SET, WITH..consumer; MERGE never auto-splits).
+  Legacy code without terminators debugs statement by statement.
+- **Execution diffs**: `diff_logs(log_a, log_b)` aligns two runs by
+  (line, kind) and reports only the divergences.
+- **Large-value offload** (`offload_threshold`): strings above the threshold
+  live in a server-side session temp table and are hydrated into variables
+  per batch — uploaded once per change instead of re-sent on every step
+  (graceful fallback if the endpoint lacks temp tables).
+- **Memory bounds**: `history_batches=N` prunes old SUCCESS payloads
+  (batch text/result sets) keeping the last N and every ERROR; `step_into`
+  on WHILE now prunes the previous iteration's executed sub-steps, so long
+  loops no longer grow the step list per iteration.
+
 ## 0.1.0 — 2026-09-03
 
 First release.

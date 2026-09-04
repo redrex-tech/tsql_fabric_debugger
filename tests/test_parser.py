@@ -180,3 +180,33 @@ def test_go_as_identifier_does_not_truncate_bare_body():
 
     go_tokens = [t for t in tokens if t.get("u") == "GO"]
     assert [_is_batch_separator(sql, t) for t in go_tokens] == [False, False, True]
+
+
+def test_semicolonless_statements_split_correctly():
+    from tsql_fabric_debugger.parser import skip_stmt
+    # legacy T-SQL without ';': statements split on the next starter keyword
+    sql = "SET @a = 1 SET @b = 2 SELECT 1"
+    tokens = scan(sql)
+    j1 = skip_stmt(tokens, 0, len(tokens))
+    assert sql[tokens[0]["s"]:tokens[j1 - 1]["e"]] == "SET @a = 1"
+
+    # INSERT..SELECT and UPDATE..SET are ONE statement each
+    sql = "INSERT INTO t SELECT a FROM x UPDATE t2 SET b = 1"
+    tokens = scan(sql)
+    j1 = skip_stmt(tokens, 0, len(tokens))
+    assert sql[tokens[0]["s"]:tokens[j1 - 1]["e"]] == "INSERT INTO t SELECT a FROM x"
+    j2 = skip_stmt(tokens, j1, len(tokens))
+    assert sql[tokens[j1]["s"]:tokens[j2 - 1]["e"]] == "UPDATE t2 SET b = 1"
+
+    # a CTE's consumer belongs to the WITH
+    sql = "WITH c AS (SELECT 1 AS a) SELECT * FROM c SET @x = 1"
+    tokens = scan(sql)
+    j1 = skip_stmt(tokens, 0, len(tokens))
+    assert sql[tokens[0]["s"]:tokens[j1 - 1]["e"]] == "WITH c AS (SELECT 1 AS a) SELECT * FROM c"
+
+    # MERGE never auto-splits (T-SQL requires its ';')
+    sql = ("MERGE t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = s.a "
+           "WHEN NOT MATCHED THEN INSERT (a) VALUES (s.a); SELECT 1")
+    tokens = scan(sql)
+    j1 = skip_stmt(tokens, 0, len(tokens))
+    assert sql[tokens[0]["s"]:tokens[j1 - 1]["e"]].endswith("VALUES (s.a);")
