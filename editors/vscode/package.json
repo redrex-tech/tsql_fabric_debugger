@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -13,6 +13,7 @@
   "bugs": {
     "url": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode/issues"
   },
+  "icon": "media/logo.png",
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -28,7 +29,10 @@
   ],
   "activationEvents": [
     "onDebugResolve:tsql-fabric",
-    "onDebugDynamicConfigurations:tsql-fabric"
+    "onDebugDynamicConfigurations:tsql-fabric",
+    "onView:tsqlFabricFiles",
+    "onView:tsqlFabricWorkspace",
+    "onView:tsqlFabricProcedures"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -37,6 +41,159 @@
         "language": "sql"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tsqlFabric",
+          "title": "T-SQL Fabric",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "tsqlFabric": [
+        {
+          "id": "tsqlFabricProcedures",
+          "name": "Warehouse Procedures",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "tsqlFabricWorkspace",
+          "name": "Fabric Workspace",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "tsqlFabricFiles",
+          "name": "Project Files",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tsqlFabricProcedures",
+        "contents": "Connect to a warehouse to browse and debug its stored procedures.\n[Connect to Warehouse](command:tsqlFabric.connect)\n[Check setup](command:tsqlFabric.checkSetup)"
+      },
+      {
+        "view": "tsqlFabricWorkspace",
+        "contents": "Debug T-SQL stored procedures on Microsoft Fabric — right here.\n\nFirst, connect to a warehouse (you pick it from a list; the endpoint is filled in for you).\n[Connect to Warehouse](command:tsqlFabric.connect)\n[Check setup](command:tsqlFabric.checkSetup)\n\nSign-in uses the Azure CLI (az login). Nothing is written to the warehouse — every debug run ends in ROLLBACK."
+      },
+      {
+        "view": "tsqlFabricFiles",
+        "contents": "No .sql or .ipynb files in this folder yet.\n[Open a folder](command:vscode.openFolder)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tsqlFabric.connect",
+        "title": "T-SQL Fabric: Connect to Warehouse",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "tsqlFabric.switchWarehouse",
+        "title": "T-SQL Fabric: Switch Warehouse",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "tsqlFabric.checkSetup",
+        "title": "T-SQL Fabric: Check Setup"
+      },
+      {
+        "command": "tsqlFabric.killOrphans",
+        "title": "T-SQL Fabric: Kill Orphan Debug Sessions",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "tsqlFabric.openSettings",
+        "title": "T-SQL Fabric: Open Plugin Settings",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "tsqlFabric.refreshFiles",
+        "title": "T-SQL Fabric: Refresh Project Files",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.refreshWorkspace",
+        "title": "T-SQL Fabric: Refresh Fabric Workspace",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.openNotebook",
+        "title": "T-SQL Fabric: Open Notebook in VS Code"
+      },
+      {
+        "command": "tsqlFabric.openInFabric",
+        "title": "T-SQL Fabric: Open Notebook in Fabric (browser)",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "tsqlFabric.debugFile",
+        "title": "T-SQL Fabric: Debug this procedure",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "tsqlFabric.refreshProcedures",
+        "title": "T-SQL Fabric: Refresh Procedures",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.debugProcedure",
+        "title": "T-SQL Fabric: Debug this procedure",
+        "icon": "$(debug-alt)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "tsqlFabric.connect",
+          "when": "view == tsqlFabricWorkspace",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.refreshWorkspace",
+          "when": "view == tsqlFabricWorkspace",
+          "group": "navigation@2"
+        },
+        {
+          "command": "tsqlFabric.openSettings",
+          "when": "view == tsqlFabricWorkspace",
+          "group": "navigation@3"
+        },
+        {
+          "command": "tsqlFabric.refreshFiles",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.connect",
+          "when": "view == tsqlFabricProcedures",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.refreshProcedures",
+          "when": "view == tsqlFabricProcedures",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "tsqlFabric.debugFile",
+          "when": "view == tsqlFabricFiles && viewItem == sqlFile",
+          "group": "inline"
+        },
+        {
+          "command": "tsqlFabric.debugProcedure",
+          "when": "view == tsqlFabricProcedures && viewItem == procedure",
+          "group": "inline"
+        },
+        {
+          "command": "tsqlFabric.openInFabric",
+          "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
+          "group": "inline"
+        }
+      ]
+    },
     "configuration": {
       "title": "T-SQL Fabric Debugger",
       "properties": {
@@ -59,6 +216,22 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Override the debug adapter command. Empty = run `<python> -m tsql_fabric_debugger.dap`. Set to `tsql-fabric-dap` to use the installed console script directly."
+        },
+        "tsqlFabric.lockTimeout": {
+          "type": "number",
+          "default": 30,
+          "markdownDescription": "Seconds a debug step waits on a lock before failing (SET LOCK_TIMEOUT). Bounds how long a paused debug can block other sessions on a shared/production warehouse. `0` disables (wait forever — not recommended)."
+        },
+        "tsqlFabric.stepTimeout": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Seconds a single step may run before it is cancelled. `0` = no limit. Set a limit on production to bound heavy statements."
+        },
+        "tsqlFabric.productionWarehouses": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Warehouse names or endpoint substrings you consider **production**. Debugging one of these asks for confirmation first (a debug session holds locks while paused) and marks the status bar. Example: `[\"wh_prod\", \"prod.datawarehouse\"]`."
         }
       }
     },
@@ -170,6 +343,20 @@
             }
           },
           {
+            "label": "T-SQL Fabric: debug a deployed procedure with params",
+            "description": "Fetch a deployed procedure and pass parameter values.",
+            "body": {
+              "type": "tsql-fabric",
+              "request": "launch",
+              "name": "Debug deployed procedure",
+              "procName": "dbo.load_sales",
+              "params": {
+                "@year": 2015
+              },
+              "stopOnEntry": true
+            }
+          },
+          {
             "label": "T-SQL Fabric: debug a deployed procedure",
             "description": "Fetch a deployed procedure's source from the warehouse and step through it.",
             "body": {
@@ -190,13 +377,20 @@
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
     "watch": "npm run build -- --sourcemap --watch",
     "compile-check": "tsc --noEmit -p ./",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "mutation": "stryker run"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.75.0",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.23.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
   }
 }

@@ -434,6 +434,15 @@ procedure), `params`, `server`, `database`, `stopOnEntry`, plus the engine
 pass-throughs `maxLoopIterations`, `historyBatches`, `logLevel`,
 `stepTimeout`, `lockTimeout`.
 
+Result sets: when a step returns rows (a diagnostic `SELECT`, say), the adapter
+prints them as a fixed-width text table to the Debug Console **and** emits a
+`tsqlFabricResultSet` custom event with `{line, columns, rows, truncated}` —
+`rows` are JSON-safe (non-primitive values stringified), `truncated` reflects
+the engine's `max_result_rows` cap. A DAP client can subscribe to that event to
+render a grid; the VS Code extension opens a **Result Set** webview beside the
+editor. Emitted from both the interactive step path and the initial run when
+`stopOnEntry` is false.
+
 Safety and limits: one launch = one debugger = one warehouse session; the
 adapter never commits — disconnect (or the client going away) rolls back.
 **Hover** evaluation answers only for plain `@variables`, from captured state

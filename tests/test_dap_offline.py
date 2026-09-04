@@ -149,9 +149,9 @@ END;
 
 
 def test_dap_unsupported_request_is_answered(fake_session, tmp_path):
-    messages = _run(_requests(("initialize", {}), ("restart", {}),
+    messages = _run(_requests(("initialize", {}), ("restartFrame", {}),
                               ("disconnect", {})))
-    bad = _by(messages, command="restart")[0]
+    bad = _by(messages, command="restartFrame")[0]
     assert bad["success"] is False and "unsupported" in bad["message"]
 
 
@@ -297,3 +297,198 @@ def test_parse_client_value_strict_numbers():
     assert _parse_client_value("nan") == "nan"
     assert _parse_client_value("1_000") == "1_000"   # not 1000
     assert _parse_client_value("-2.5e3") == -2500.0
+
+
+# ---------------------------------------------------------------------------
+# layer 1: restart, terminate, exceptionInfo, completions, logpoints
+# ---------------------------------------------------------------------------
+def test_dap_capabilities_layer1():
+    import io
+    msgs = _run(_requests(("initialize", {}), ("disconnect", {})))
+    caps = _by(msgs, command="initialize")[0]["body"]
+    for c in ("supportsRestartRequest", "supportsTerminateRequest",
+              "supportsLogPoints", "supportsExceptionInfoRequest",
+              "supportsCompletionsRequest"):
+        assert caps.get(c) is True, c
+
+
+def test_dap_restart_replays(fake_session, tmp_path):
+    fake_session.turn(updates={"@OUT": 5})       # 1st run: step 1
+    fake_session.turn(updates={"@OUT": 6})       # 1st run: step 2 (to the end)
+    fake_session.turn(updates={"@OUT": 5})       # after restart: step 1
+    fake_session.turn(updates={"@OUT": 6})       # after restart: step 2
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", _launch_args(tmp_path)),      # stopOnEntry defaults True
+        ("configurationDone", {}),
+        ("restart", {}),
+        ("continue", {"threadId": 1}),
+        ("disconnect", {}),
+    ))
+    assert _by(messages, command="restart")[0]["success"]
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    assert stops == ["entry", "entry"]           # entry, then entry again on restart
+    assert _by(messages, event="terminated")
+
+
+def test_dap_terminate(fake_session, tmp_path):
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", _launch_args(tmp_path)),
+        ("configurationDone", {}),
+        ("terminate", {}),
+        ("disconnect", {}),
+    ))
+    assert _by(messages, command="terminate")[0]["success"]
+    assert _by(messages, event="terminated")
+
+
+def test_dap_exception_info(fake_session, tmp_path):
+    fake_session.fail("Divide by zero error encountered")
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("configurationDone", {}),               # runs, hits the error, stops
+        ("exceptionInfo", {"threadId": 1}),
+        ("disconnect", {}),
+    ))
+    info = _by(messages, command="exceptionInfo")[0]
+    assert info["success"]
+    assert "Divide by zero" in info["body"]["description"]
+
+
+def test_dap_completions_suggests_variables(fake_session, tmp_path):
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", _launch_args(tmp_path)),
+        ("configurationDone", {}),
+        ("completions", {"text": "@", "column": 2}),
+        ("disconnect", {}),
+    ))
+    targets = _by(messages, command="completions")[0]["body"]["targets"]
+    labels = {t["label"] for t in targets}
+    assert "@n" in labels and "@out" in labels and "@@ROWCOUNT" in labels
+
+
+def test_dap_logpoint_via_logmessage(fake_session, tmp_path):
+    fake_session.turn(updates={"@OUT": 5}, watches={"__lp__4_0": 5})
+    fake_session.turn(updates={"@OUT": 6})
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("setBreakpoints", {"source": {"path": "proc.sql"},
+                            "breakpoints": [{"line": 4, "logMessage": "out={@out}"}]}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    bps = _by(messages, command="setBreakpoints")[0]["body"]["breakpoints"]
+    assert bps == [{"verified": True, "line": 4}]
+    # logpoint never stops: the run went straight to terminated
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    assert stops == []
+    assert _by(messages, event="terminated")
+
+
+def test_dap_logpoint_plain_text_never_evaluates(fake_session, tmp_path):
+    # regression: a plain-text logMessage must NOT run on the server (it would
+    # be invalid SQL and roll back). It prints literally, session survives.
+    fake_session.turn(updates={"@OUT": 5})       # SET @out = @n
+    fake_session.turn(updates={"@OUT": 6})       # SET @out = @out + 1 (to end)
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("setBreakpoints", {"source": {"path": "proc.sql"},
+                            "breakpoints": [{"line": 4, "logMessage": "reached here"}]}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    bps = _by(messages, command="setBreakpoints")[0]["body"]["breakpoints"]
+    assert bps == [{"verified": True, "line": 4}]
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    assert stops == []                            # never stopped, no error
+    assert _by(messages, event="terminated")
+
+
+def test_dap_restart_after_run_finished_relaunches(fake_session, tmp_path):
+    # restart must work even after the run finished (terminated) — the whole
+    # point of a replay debugger.
+    fake_session.turn(updates={"@OUT": 5})       # 1st run to the end
+    fake_session.turn(updates={"@OUT": 6})
+    fake_session.turn(updates={"@OUT": 5})       # relaunched run
+    fake_session.turn(updates={"@OUT": 6})
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("configurationDone", {}),               # runs to the end -> terminated
+        ("restart", {}),                          # after terminated: relaunch
+        ("continue", {"threadId": 1}),
+        ("disconnect", {}),
+    ))
+    assert _by(messages, command="restart")[0]["success"]
+    # two terminated events: the first run, and the relaunched run
+    assert len(_by(messages, event="terminated")) == 2
+
+
+def test_dap_restart_after_terminate_keeps_breakpoints(fake_session, tmp_path):
+    # regression: after the run finished, restart must relaunch AND reapply the
+    # breakpoints (VS Code does not re-send them on restart).
+    fake_session.turn(updates={"@OUT": 5})       # 1st run: line 4, stops at bp line 5
+    fake_session.turn(updates={"@OUT": 6})       # 1st run: line 5 (after continue)
+    fake_session.turn(updates={"@OUT": 5})       # relaunch: line 4, stops at bp line 5
+    fake_session.turn(updates={"@OUT": 6})       # relaunch: line 5
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("setBreakpoints", {"source": {"path": "proc.sql"},
+                            "breakpoints": [{"line": 5}]}),
+        ("configurationDone", {}),               # runs, stops at bp line 5
+        ("continue", {"threadId": 1}),           # runs to end -> terminated
+        ("restart", {}),                          # relaunch + reapply bp
+        ("continue", {"threadId": 1}),           # should stop at bp line 5 again
+        ("disconnect", {}),
+    ))
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    # breakpoint before restart, and breakpoint again AFTER restart
+    assert stops.count("breakpoint") == 2, stops
+
+
+def test_logpoint_message_renders_plain(fake_session):
+    from tsql_fabric_debugger.engine import TSQLDebugger
+    lines = []
+    dbg = TSQLDebugger(sql_text=SIMPLE, params={"@n": 5}, server="s", database="d",
+                       echo=lambda m: lines.append(str(m)))
+    dbg.log_at(4, message="n={@n} out={@out} done")
+    fake_session.turn(updates={"@OUT": 5}, watches={"__lp__4_0": 5, "__lp__4_1": None})
+    dbg.step()
+    rendered = [l for l in lines if "logpoint (line 4)" in l]
+    assert rendered and "n=5 out=NULL done" in rendered[0]   # plain, NULL not None
+    dbg.close()
+
+
+def test_dap_emits_result_set_event_and_console(fake_session, tmp_path):
+    # a procedure that produces a diagnostic SELECT -> result-set event + console
+    sql = tmp_path / "diag.sql"
+    sql.write_text(
+        "CREATE PROCEDURE dbo.d @o INT OUTPUT AS\n"
+        "BEGIN\n"
+        "    SELECT 1 AS a, N'x' AS b;\n"
+        "    SET @o = 7;\n"
+        "END;\n", encoding="utf-8")
+    fake_session.turn(resultsets=[(["a", "b"], [[1, "x"]])])   # the SELECT step
+    fake_session.turn(updates={"@O": 7})                       # SET @o = 7
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", {"program": str(sql), "params": {}, "server": "s",
+                    "database": "d", "stopOnEntry": False}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    rs = [m for m in messages if m.get("type") == "event"
+          and m.get("event") == "tsqlFabricResultSet"]
+    assert rs, "no tsqlFabricResultSet event"
+    body = rs[0]["body"]
+    assert body["columns"] == ["a", "b"] and body["rows"] == [[1, "x"]]
+    # also printed to the console
+    console = "".join(e["body"]["output"] for e in messages
+                      if e.get("event") == "output")
+    assert "result set" in console and "a | b" in console

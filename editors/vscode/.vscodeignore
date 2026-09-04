@@ -1,7 +1,12 @@
 .vscode/**
 src/**
+test/**
 node_modules/**
 tsconfig.json
+vitest.config.mts
+stryker.conf.json
+.stryker-tmp/**
+reports/**
 .gitignore
 **/*.map
 **/*.ts

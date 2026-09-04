@@ -49,6 +49,11 @@ client (VS Code, nvim-dap, ...) at it and debug the `.sql` visually — gutter
 breakpoints, step over/into/out, variables pane, hover evaluation. Never
 commits; disconnect rolls back.
 
+Rows a step returns are surfaced two ways: printed as a text table to the
+Debug Console, and emitted as a `tsqlFabricResultSet` custom DAP event
+(`{line, columns, rows, truncated}`) so a client can render them in a grid —
+the VS Code extension shows a **Result Set** panel beside the editor.
+
 A **VS Code extension** that wires this up (F5 on a `.sql`, no launch.json
 needed) lives in [`editors/vscode/`](editors/vscode/) — preview/MVP.
 

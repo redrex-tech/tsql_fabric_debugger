@@ -1260,3 +1260,51 @@ def test_run_until_notices_marks_inside_blocks(fake_session):
     dbg.run_until(line=5)                          # up to the WHILE, inclusive
     assert any("[NOTICE] run_until runs blocks whole" in l for l in lines)
     dbg.close()
+
+
+def test_breakpoint_on_while_header_and_body_stops_in_body(fake_session):
+    # regression: breakpoint on the WHILE header (line 5) AND inside the loop
+    # (line 7). Continuing from the header must expand the loop and stop at the
+    # body breakpoint — not run the whole loop past it.
+    dbg = TSQLDebugger(sql_text=LOOPPROC, params={"@n": 3}, server="s", database="d",
+                       echo=lambda *_: None)
+    dbg.break_at(5)                             # WHILE header
+    dbg.break_at(7)                             # loop body (SET @i = @i + 1)
+    fake_session.turn(updates={"@I": 0})        # SET @i = 0
+    dbg.run_all()
+    assert dbg._steps[dbg._pos]["line"] == 5    # stopped at the header
+    fake_session.turn(cond=1)                   # WHILE @i < @n -> true (expand)
+    dbg.run_all()
+    assert dbg._steps[dbg._pos]["line"] == 7    # stopped INSIDE the loop
+    assert dbg._env["@I"] == 0                  # body not executed yet
+    dbg.close()
+
+
+def test_list_parameters_via_fake(fake_session):
+    from tsql_fabric_debugger.introspect import list_parameters
+    # FakeSession answers registered ad-hoc queries by needle
+    fake_session.adhoc.append(("information_schema.parameters",
+                               ["PARAMETER_NAME", "DATA_TYPE", "PARAMETER_MODE"],
+                               [("@year", "int", "IN"),
+                                ("@out", "int", "INOUT")]))
+    result = list_parameters("dbo.load_sales", "s", "d")
+    assert result == [{"name": "@year", "type": "int", "mode": "IN"},
+                      {"name": "@out", "type": "int", "mode": "INOUT"}]
+
+
+def test_list_procedures_via_fake(fake_session):
+    from tsql_fabric_debugger.introspect import list_procedures
+    fake_session.adhoc.append(("information_schema.routines",
+                               ["ROUTINE_SCHEMA", "ROUTINE_NAME"],
+                               [("dbo", "a"), ("pck", "b")]))
+    result = list_procedures("s", "d")
+    assert result == [{"schema": "dbo", "name": "a"},
+                      {"schema": "pck", "name": "b"}]
+
+
+def test_access_token_env_skips_az(monkeypatch):
+    # a caller-provided token (VS Code extension) is used, avoiding the az CLI
+    import tsql_fabric_debugger.connection as conn_mod
+    monkeypatch.setenv("FABRIC_TSQL_ACCESS_TOKEN", "a-ready-token")
+    assert conn_mod._get_token() == "a-ready-token"
+    monkeypatch.delenv("FABRIC_TSQL_ACCESS_TOKEN")
