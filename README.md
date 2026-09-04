@@ -45,9 +45,12 @@ a valid `az login`.
 ## IDE debugging (DAP)
 
 `tsql-fabric-dap` speaks the Debug Adapter Protocol over stdio: point any DAP
-client (VS Code via a DAP bridge extension, nvim-dap, ...) at it and debug the
-`.sql` visually — gutter breakpoints, step over/into/out, variables pane,
-hover evaluation. Never commits; disconnect rolls back.
+client (VS Code, nvim-dap, ...) at it and debug the `.sql` visually — gutter
+breakpoints, step over/into/out, variables pane, hover evaluation. Never
+commits; disconnect rolls back.
+
+A **VS Code extension** that wires this up (F5 on a `.sql`, no launch.json
+needed) lives in [`editors/vscode/`](editors/vscode/) — preview/MVP.
 
 ## Interactive usage
 
