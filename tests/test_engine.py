@@ -198,8 +198,8 @@ def test_nested_try_catch_stack_on_steps():
     assert len(dbg._catches) == 2
 
 
-def test_requires_sql_file_or_text():
-    with pytest.raises(ValueError, match="sql_file or sql_text"):
+def test_requires_sql_file_text_or_proc_name():
+    with pytest.raises(ValueError, match="sql_file, sql_text or proc_name"):
         TSQLDebugger(server="offline", database="offline", echo=lambda *_: None)
 
 
