@@ -36,6 +36,7 @@ dev = ["pytest>=8.0", "azure-identity>=1.15", "pandas>=2.0", "mutmut>=3.2"]
 [project.scripts]
 tsql-debug = "tsql_fabric_debugger.cli:main"
 tsql-fabric-dap = "tsql_fabric_debugger.dap:main"
+tsql-fabric-introspect = "tsql_fabric_debugger.introspect:main"
 
 [project.urls]
 Homepage = "https://github.com/redrex-tech/tsql_fabric_debugger"

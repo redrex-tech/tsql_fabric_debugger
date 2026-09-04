@@ -413,6 +413,8 @@ class TSQLDebugger:
                                  rows_affected=rows_affected)
             if captured and self._watches and kind not in ("cond", "params"):
                 for wname in self._watches:
+                    if wname.startswith("__lp__"):
+                        continue        # message logpoints render via the template
                     self._echo(f"      ?? {wname} = {_shorten(self._watch_values.get(wname))}")
         except KeyboardInterrupt:
             # pyodbc does not abort the server-side statement on SIGINT —
@@ -610,37 +612,66 @@ class TSQLDebugger:
         finally:
             self._disarm_logpoint(lp_temp)
 
+    _LP_MARK = "\x00\x01__lp__\x01\x00"   # placeholder unlikely in any message
+
     @staticmethod
     def _logpoint_key(line):
         return f"logpoint_l{line}"
 
     def _arm_logpoint(self, step):
-        """Attach the line's logpoint (if any) to this step's capture as a
-        temporary watch; returns the watch key to disarm, or None."""
-        if not self._logpoints or step["line"] not in self._logpoints:
-            return None
-        expr = self._logpoints[step["line"]]
-        if expr is None:
-            self._echo(f"      .. logpoint: reached line {step['line']}")
-            return None
-        key = self._logpoint_key(step["line"])
-        if key in self._watches:
-            self._echo(f"[WARNING] a watch named '{key}' exists — the logpoint "
-                       f"expression at line {step['line']} cannot run. "
-                       f"unwatch('{key}') to enable it.")
-            return None
-        self._watches[key] = expr
-        return key
+        """Attach the line's logpoint (if any) to this step's capture; returns
+        an armed handle to disarm/render, or None.
 
-    def _disarm_logpoint(self, key, echo_value=False):
-        if key is not None:
-            self._watches.pop(key, None)
+        Legacy single-expression logpoints use one visible watch (echoed as
+        `?? logpoint_l<line> = ...`). Message logpoints evaluate each {expr}
+        via hidden `__lp__` watches and render the template on disarm.
+        """
+        lp = self._logpoints.get(step["line"]) if self._logpoints else None
+        if lp is None:
+            return None
+        exprs, template = lp["exprs"], lp["template"]
+        if not exprs:
+            marker = template if template is not None else f"reached line {step['line']}"
+            self._echo(f"      .. logpoint: {marker}")
+            return None
+        if template is None:
+            key = self._logpoint_key(step["line"])
+            if key in self._watches:
+                self._echo(f"[WARNING] a watch named '{key}' exists — the logpoint "
+                           f"expression at line {step['line']} cannot run. "
+                           f"unwatch('{key}') to enable it.")
+                return None
+            self._watches[key] = exprs[0]
+            return {"keys": [key], "template": None, "line": step["line"]}
+        keys = []
+        for i, e in enumerate(exprs):
+            key = f"__lp__{step['line']}_{i}"
+            self._watches[key] = e
+            keys.append(key)
+        return {"keys": keys, "template": template, "line": step["line"]}
+
+    def _disarm_logpoint(self, armed, echo_value=False):
+        if armed is None:
+            return
+        keys, template = armed["keys"], armed["template"]
+        if template is None:
+            key = keys[0]
             captured = key in self._watch_values
             value = self._watch_values.pop(key, None)
+            self._watches.pop(key, None)
             if echo_value and captured:
                 # condition-eval entries suppress the normal watch echo —
                 # a header logpoint still owes the user its value
                 self._echo(f"      ?? {key} = {_shorten(value)}")
+            return
+        values = [self._watch_values.pop(k, None) for k in keys]
+        for k in keys:
+            self._watches.pop(k, None)
+        parts = template.split(self._LP_MARK)
+        rendered = parts[0]
+        for text, v in zip(parts[1:], values):
+            rendered += _lp_str(v) + text
+        self._echo(f"      .. logpoint (line {armed['line']}): {rendered}")
 
     def _handle_step_error(self, step, emulate_catch, finalize):
         if step["kind"].endswith("_block"):
@@ -1197,9 +1228,10 @@ class TSQLDebugger:
         bare 'logpoint') are reserved for log_at() output.
         """
         self._validate_expr(expr, "watch")
-        if name is not None and re.fullmatch(r"logpoint(_l\d+)?", name):
-            raise ValueError("names matching 'logpoint_l<line>' are reserved "
-                             "for log_at() output.")
+        if name is not None and (re.fullmatch(r"logpoint(_l\d+)?", name)
+                                 or name.startswith("__lp__")):
+            raise ValueError("names matching 'logpoint_l<line>' or '__lp__*' "
+                             "are reserved for log_at() output.")
         if name is None:
             self._watch_seq += 1
             name = f"w{self._watch_seq}"
@@ -1273,7 +1305,8 @@ class TSQLDebugger:
         return {line: dict(bp) for line, bp in self._breaks.items()}
 
     # -- logpoints ----------------------------------------------------------
-    def log_at(self, line: int, expr: str | None = None) -> None:
+    def log_at(self, line: int, expr: str | None = None,
+               message: str | None = None) -> None:
         """Echo when execution passes a FILE line — without ever stopping.
 
         With an expression, its server-side value at that step is printed
@@ -1281,19 +1314,39 @@ class TSQLDebugger:
         dbg.log_at(8, "@fat"). Without one, a passage marker is printed.
         One logpoint per line; calling again replaces it.
 
+        A `message` is a template with `{expr}` placeholders (the VS Code
+        logpoint form): each expression is evaluated server-side and
+        interpolated; text outside the braces is printed literally and NEVER
+        evaluated (so a plain "reached here" is safe). Pass `expr` OR
+        `message`, not both.
+
         As with break_at, the line must hold a statement or a block header —
         a logpoint on a BEGIN/END/blank line never matches a step. run_all()
         auto-expands IF/WHILE blocks that contain a logpoint line (loops with
         BREAK/CONTINUE cannot expand — a notice is printed and the loop runs
-        whole). The expression runs inside the step's batch: one that fails
+        whole). Any {expr}/expr runs inside the step's batch: one that fails
         server-side fails the step, exactly like a watch would.
         """
         if isinstance(line, bool) or not isinstance(line, int):
             raise ValueError("line must be an int (a file line number).")
-        if expr is not None:
+        if expr is not None and message is not None:
+            raise ValueError("Pass expr OR message, not both.")
+        if message is not None:
+            exprs = [e.strip() for e in re.findall(r"\{([^}]+)\}", message)]
+            for e in exprs:
+                self._validate_expr(e, "logpoint")
+            template = re.sub(r"\{[^}]+\}", self._LP_MARK, message)
+            self._logpoints[line] = {"exprs": exprs, "template": template,
+                                     "message": message}
+            self._echo(f"logpoint at line {line}: {message}")
+        elif expr is not None:
             self._validate_expr(expr, "logpoint")
-        self._logpoints[line] = expr
-        self._echo(f"logpoint at line {line}" + (f": {expr}" if expr else ""))
+            self._logpoints[line] = {"exprs": [expr], "template": None,
+                                     "message": None}
+            self._echo(f"logpoint at line {line}: {expr}")
+        else:
+            self._logpoints[line] = {"exprs": [], "template": None, "message": None}
+            self._echo(f"logpoint at line {line}")
 
     def clear_logpoints(self, line: int | None = None) -> None:
         """Remove the logpoint at one line, or all of them."""
@@ -1305,8 +1358,16 @@ class TSQLDebugger:
             self._echo(f"logpoint at line {line} removed.")
 
     def logpoints(self) -> dict:
-        """Registered logpoints: {line: expression | None}."""
-        return dict(self._logpoints)
+        """Registered logpoints: {line: expression | message | None}."""
+        out = {}
+        for line, lp in self._logpoints.items():
+            if lp["message"] is not None:
+                out[line] = lp["message"]
+            elif lp["exprs"]:
+                out[line] = lp["exprs"][0]
+            else:
+                out[line] = None
+        return out
 
     # -- state snapshots ----------------------------------------------------
     def save_state(self, path: str | None = None) -> dict:
@@ -1606,35 +1667,39 @@ class TSQLDebugger:
                     return self.log_df()
                 continue
             step = self._steps[self._pos]
-            marks = (set(self._breaks) | set(self._logpoints)
-                     if (self._breaks or self._logpoints) else set())
-            if (marks and step["kind"] in ("if_block", "while_block")
-                    and self._break_resume != self._pos
-                    and step["line"] not in self._breaks):
-                # a breakpoint/logpoint INSIDE a block only exists as a step
-                # after the block is expanded — auto step_into blocks that
-                # contain one (a breakpoint on the block's OWN line is
-                # handled below)
+            resuming = self._break_resume == self._pos
+            # 1) a breakpoint on THIS step's own line (a statement, or an
+            #    IF/WHILE header) stops BEFORE the step executes
+            if self._breaks and self._break_should_stop(step):
+                return self.log_df()
+            self._break_resume = None
+            # 2) a block whose BODY holds a breakpoint/logpoint is expanded so
+            #    those inner marks can fire — even when the header itself had a
+            #    breakpoint we just resumed past (the reason a breakpoint inside
+            #    a loop is honored, not skipped by running the loop whole)
+            if (not into and step["kind"] in ("if_block", "while_block")
+                    and (self._breaks or self._logpoints)):
+                marks = set(self._breaks) | set(self._logpoints)
                 end_line = self._sql.count("\n", 0, step["e"]) + 1
                 if any(step["line"] < ml <= end_line for ml in marks):
                     body_text = step["text"].upper()
                     if step.get("is_loop") and ("BREAK" in body_text
                                                 or "CONTINUE" in body_text):
-                        if any(step["line"] < bl <= end_line
-                               for bl in self._breaks):
-                            # step_into cannot expand this loop — stop before
-                            # it instead of running through the breakpoint
+                        # step_into cannot expand a loop with BREAK/CONTINUE
+                        if not resuming and any(step["line"] < bl <= end_line
+                                                for bl in self._breaks):
                             self._break_resume = self._pos
                             self._echo(f"[BREAK] stopped BEFORE the WHILE at line "
                                        f"{step['line']} — it contains a breakpoint but "
                                        "BREAK/CONTINUE prevents expansion; step() runs "
                                        "it whole.")
                             return self.log_df()
-                        # only logpoints inside: they cannot fire, but they
-                        # must never stop execution — notice and run whole
-                        self._echo(f"[NOTICE] logpoint(s) inside the WHILE at line "
-                                   f"{step['line']} cannot fire: BREAK/CONTINUE "
-                                   "prevents expansion — the loop runs whole.")
+                        if not resuming:
+                            self._echo(f"[NOTICE] breakpoint/logpoint inside the WHILE "
+                                       f"at line {step['line']} cannot fire: "
+                                       "BREAK/CONTINUE prevents expansion — the loop "
+                                       "runs whole.")
+                        # fall through: step() runs the loop whole
                     else:
                         self.step_into()
                         if self._loop_aborted:
@@ -1642,9 +1707,6 @@ class TSQLDebugger:
                             self._echo(self._LOOP_ABORT_BREAK)
                             return self.log_df()
                         continue
-            if self._breaks and self._break_should_stop(step):
-                return self.log_df()
-            self._break_resume = None
             entry = self.step_into() if into else self.step()
             if self._pause_on_caught(entry):
                 return self.log_df()
@@ -1961,6 +2023,15 @@ def _decode_value(encoded):
         if "__b64__" in encoded:
             return base64.b64decode(encoded["__b64__"])
     return encoded
+
+
+def _lp_str(value, limit=200):
+    """A value as it reads in a logpoint MESSAGE: NULL for None, the string
+    itself (no quotes), truncated — never Python repr."""
+    if value is None:
+        return "NULL"
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + f"… ({len(text)} chars)"
 
 
 def _clip(text, limit=60):

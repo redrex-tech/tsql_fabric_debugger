@@ -74,6 +74,7 @@ class DapServer:
         self._configured = False     # configurationDone seen
         self._running = True
         self._frame_nodes = {}       # frameId -> debugger (from stackTrace)
+        self._launch_args = None     # last launch args, for Restart after end
 
     # -- wire protocol ------------------------------------------------------
     def _read_message(self):
@@ -210,7 +211,9 @@ class DapServer:
         """
         if not self._require_root(request):
             return
+        active = self._active()
         before = self._errors()
+        log_before = len(active._log) if active is not None else 0
         try:
             op(self._active())
         except Exception as exc:
@@ -218,7 +221,28 @@ class DapServer:
             self._terminate()
             return
         self._respond(request, body=body)
+        self._emit_result_sets(log_before)
         self._after_execution(before)
+
+    def _emit_result_sets(self, log_before):
+        """Surface any result sets the procedure produced in the steps that
+        just ran: printed to the Debug Console AND sent as a custom event so
+        the extension can show them in a grid."""
+        dbg = self._active()
+        if dbg is None:
+            return
+        for entry in dbg._log[log_before:]:
+            if not entry.get("result_sets"):
+                continue
+            for rs in dbg._details.get(entry["step"], {}).get("resultsets", []):
+                cols, rows = rs["columns"], rs["rows"]
+                self._output(_format_table(cols, rows, rs["truncated"],
+                                           entry["line"]))
+                self._event("tsqlFabricResultSet", {
+                    "line": entry["line"], "columns": cols,
+                    "rows": [[_json_safe(v) for v in r] for r in rows],
+                    "truncated": rs["truncated"],
+                })
 
     # -- request handlers ---------------------------------------------------
     def serve(self):
@@ -247,8 +271,14 @@ class DapServer:
             "supportsConfigurationDoneRequest": True,
             "supportsConditionalBreakpoints": True,
             "supportsHitConditionalBreakpoints": True,
+            "supportsLogPoints": True,
             "supportsEvaluateForHovers": True,
             "supportsSetVariable": True,
+            "supportsRestartRequest": True,
+            "supportsTerminateRequest": True,
+            "supportsExceptionInfoRequest": True,
+            "supportsCompletionsRequest": True,
+            "completionTriggerCharacters": ["@"],
             "exceptionBreakpointFilters": [
                 {"filter": "caught", "label": "CATCH-handled errors",
                  "default": False},
@@ -256,9 +286,8 @@ class DapServer:
         })
         self._event("initialized")
 
-    def _on_launch(self, request):
-        args = request.get("arguments", {})
-        self._close_root()               # a second launch must not leak a session
+    def _build_root(self, args):
+        """Create the root debugger from launch arguments."""
         self._source_path = args.get("program")
         self._stop_on_entry = bool(args.get("stopOnEntry", True))
         kwargs = dict(params=args.get("params") or {},
@@ -275,12 +304,17 @@ class DapServer:
                                      ("lockTimeout", "lock_timeout")):
             if args.get(launch_key) is not None:
                 kwargs[ctor_key] = args[launch_key]
-        self._root = TSQLDebugger(**kwargs)
+        return TSQLDebugger(**kwargs)
+
+    def _on_launch(self, request):
+        args = request.get("arguments", {})
+        self._close_root()               # a second launch must not leak a session
+        self._launch_args = args         # kept so Restart can relaunch after end
+        self._root = self._build_root(args)
         if self._pending_filters:
             self._apply_exception_filters(self._pending_filters)
         if self._pending_breaks is not None:
             self._apply_breakpoints(self._pending_breaks)
-            self._pending_breaks = None
         self._respond(request)
         if self._configured:             # configurationDone arrived pre-launch
             self._start_debuggee()
@@ -304,9 +338,26 @@ class DapServer:
         dbg = self._root
         requested = args.get("breakpoints", [])
         results = []
-        plan = []
+        plan = []       # (line, condition, hits) for real breakpoints
+        logplan = []    # (line, expr) for logpoints
         for bp in requested:
             line = bp.get("line")
+            log_message = bp.get("logMessage")
+            if log_message is not None:
+                # a logpoint (diamond): print without stopping. VS Code sends a
+                # message with {expr} placeholders — the engine evaluates each
+                # {expr} and prints the rest as literal text (so a plain
+                # "reached here" never runs on the server).
+                try:
+                    for e in re.findall(r"\{([^}]+)\}", log_message):
+                        dbg._validate_expr(e.strip(), "logpoint")
+                except ValueError as exc:
+                    results.append({"verified": False, "line": line,
+                                    "message": str(exc)})
+                    continue
+                logplan.append((line, log_message))
+                results.append({"verified": True, "line": line})
+                continue
             condition = bp.get("condition")
             note = None
             hits = None
@@ -326,12 +377,15 @@ class DapServer:
             results.append(entry)
         previous = dbg.breaks()
         dbg.clear_breaks()
+        dbg.clear_logpoints()
         for line, condition, hits in plan:
             dbg.break_at(line, condition=condition, hits=hits)
             old = previous.get(line)
             if (old and old["condition"] == condition and old["hits"] == hits
                     and not old["once"]):
                 dbg._breaks[line]["count"] = old["count"]
+        for line, message in logplan:
+            dbg.log_at(line, message=message)
         return results
 
     def _on_setBreakpoints(self, request):
@@ -344,6 +398,9 @@ class DapServer:
                        for bp in args.get("breakpoints", [])]
             self._respond(request, body={"breakpoints": results})
             return
+        # remember the latest set so Restart (which relaunches without a fresh
+        # setBreakpoints from the client) can reapply it
+        self._pending_breaks = args
         self._respond(request, body={"breakpoints": self._apply_breakpoints(args)})
 
     def _apply_exception_filters(self, filters):
@@ -363,7 +420,9 @@ class DapServer:
             self._stopped("entry")
         else:
             before = self._errors()
+            log_before = len(self._root._log)
             self._root.run_all()
+            self._emit_result_sets(log_before)
             self._after_execution(before)
 
     def _on_configurationDone(self, request):
@@ -476,10 +535,86 @@ class DapServer:
     def _on_stepOut(self, request):
         self._run_op(request, lambda dbg: dbg.step_out())
 
+    def _on_restart(self, request):
+        try:
+            if self._root is not None:
+                self._root.reset()          # replay in the same session
+            elif self._launch_args is not None:
+                # the run finished (terminated); relaunch from the saved args
+                # and reapply the exception filters and breakpoints/logpoints
+                self._root = self._build_root(self._launch_args)
+                if self._pending_filters:
+                    self._apply_exception_filters(self._pending_filters)
+                if self._pending_breaks is not None:
+                    self._apply_breakpoints(self._pending_breaks)
+            else:
+                self._respond(request, success=False, message="nothing to restart")
+                return
+        except Exception as exc:
+            self._respond(request, success=False, message=str(exc))
+            self._terminate()
+            return
+        self._respond(request)
+        self._start_debuggee()   # honors stopOnEntry, exactly like launch
+
+    def _on_terminate(self, request):
+        self._respond(request)
+        self._terminate()        # ROLLBACK + terminated
+
+    def _on_exceptionInfo(self, request):
+        dbg = self._active()
+        err = dbg.last_error() if dbg is not None else None
+        if err is None:
+            self._respond(request, success=False, message="no exception recorded")
+            return
+        message = err.get("error") or "T-SQL error"
+        self._respond(request, body={
+            "exceptionId": "T-SQL error",
+            "description": message,
+            "breakMode": "always",
+            "details": {"message": message, "fullTypeName": "T-SQL error"},
+        })
+
+    def _on_completions(self, request):
+        # suggest the session's @variables in the Debug Console / REPL
+        dbg = self._active()
+        targets = []
+        if dbg is not None:
+            for key in dbg._vars:
+                targets.append({"label": dbg._vars[key]["name"], "type": "variable"})
+            targets.append({"label": "@@ROWCOUNT", "type": "variable"})
+        self._respond(request, body={"targets": targets})
+
     def _on_disconnect(self, request):
         self._close_root()
         self._respond(request)
         self._running = False
+
+
+def _json_safe(value):
+    """Make a captured cell JSON-serializable for the custom event."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _format_table(columns, rows, truncated, line):
+    """A compact fixed-width table for the Debug Console."""
+    cells = [[("" if v is None else str(v)) for v in r] for r in rows]
+    widths = [len(c) for c in columns]
+    for r in cells:
+        for i, v in enumerate(r):
+            widths[i] = max(widths[i], len(v))
+    widths = [min(w, 40) for w in widths]
+
+    def fmt(vals):
+        return " | ".join(v[:40].ljust(widths[i]) for i, v in enumerate(vals))
+
+    out = [f"result set (line {line}) — {len(rows)} row(s)"
+           + (" [truncated]" if truncated else ""),
+           fmt(columns), "-+-".join("-" * w for w in widths)]
+    out += [fmt(r) for r in cells]
+    return "\n".join(out)
 
 
 def _parse_client_value(text):
