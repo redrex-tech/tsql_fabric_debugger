@@ -211,7 +211,9 @@ class DapServer:
         """
         if not self._require_root(request):
             return
+        active = self._active()
         before = self._errors()
+        log_before = len(active._log) if active is not None else 0
         try:
             op(self._active())
         except Exception as exc:
@@ -219,7 +221,28 @@ class DapServer:
             self._terminate()
             return
         self._respond(request, body=body)
+        self._emit_result_sets(log_before)
         self._after_execution(before)
+
+    def _emit_result_sets(self, log_before):
+        """Surface any result sets the procedure produced in the steps that
+        just ran: printed to the Debug Console AND sent as a custom event so
+        the extension can show them in a grid."""
+        dbg = self._active()
+        if dbg is None:
+            return
+        for entry in dbg._log[log_before:]:
+            if not entry.get("result_sets"):
+                continue
+            for rs in dbg._details.get(entry["step"], {}).get("resultsets", []):
+                cols, rows = rs["columns"], rs["rows"]
+                self._output(_format_table(cols, rows, rs["truncated"],
+                                           entry["line"]))
+                self._event("tsqlFabricResultSet", {
+                    "line": entry["line"], "columns": cols,
+                    "rows": [[_json_safe(v) for v in r] for r in rows],
+                    "truncated": rs["truncated"],
+                })
 
     # -- request handlers ---------------------------------------------------
     def serve(self):
@@ -397,7 +420,9 @@ class DapServer:
             self._stopped("entry")
         else:
             before = self._errors()
+            log_before = len(self._root._log)
             self._root.run_all()
+            self._emit_result_sets(log_before)
             self._after_execution(before)
 
     def _on_configurationDone(self, request):
@@ -564,6 +589,32 @@ class DapServer:
         self._close_root()
         self._respond(request)
         self._running = False
+
+
+def _json_safe(value):
+    """Make a captured cell JSON-serializable for the custom event."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _format_table(columns, rows, truncated, line):
+    """A compact fixed-width table for the Debug Console."""
+    cells = [[("" if v is None else str(v)) for v in r] for r in rows]
+    widths = [len(c) for c in columns]
+    for r in cells:
+        for i, v in enumerate(r):
+            widths[i] = max(widths[i], len(v))
+    widths = [min(w, 40) for w in widths]
+
+    def fmt(vals):
+        return " | ".join(v[:40].ljust(widths[i]) for i, v in enumerate(vals))
+
+    out = [f"result set (line {line}) — {len(rows)} row(s)"
+           + (" [truncated]" if truncated else ""),
+           fmt(columns), "-+-".join("-" * w for w in widths)]
+    out += [fmt(r) for r in cells]
+    return "\n".join(out)
 
 
 def _parse_client_value(text):

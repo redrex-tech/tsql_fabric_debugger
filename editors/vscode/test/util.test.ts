@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   coerceParam,
+  isProductionTarget,
   logpointExpressions,
   matchVariables,
   parseIntrospectResult,
@@ -137,5 +138,33 @@ describe("logpointExpressions", () => {
 
   it("returns [] for plain text with no braces", () => {
     expect(logpointExpressions("reached here")).toEqual([]);
+  });
+});
+
+describe("isProductionTarget", () => {
+  it("matches a substring of the database name (case-insensitive)", () => {
+    expect(isProductionTarget("srv", "WH_Prod", ["prod"])).toBe(true);
+    expect(isProductionTarget("srv", "wh_dev", ["prod"])).toBe(false);
+  });
+  it("matches against the server endpoint too", () => {
+    expect(
+      isProductionTarget("prod.datawarehouse.fabric.microsoft.com", "wh", [
+        "prod.datawarehouse",
+      ]),
+    ).toBe(true);
+  });
+  it("ignores blank patterns so an empty entry never flags everything", () => {
+    expect(isProductionTarget("srv", "anything", [""])).toBe(false);
+    expect(isProductionTarget("srv", "anything", ["  "])).toBe(false);
+  });
+  it("trims surrounding spaces off a pattern before matching", () => {
+    // "wh_prod" has no spaces; only a trimmed " prod " matches it
+    expect(isProductionTarget("srv", "wh_prod", [" prod "])).toBe(true);
+  });
+  it("returns false with no patterns", () => {
+    expect(isProductionTarget("srv", "db", [])).toBe(false);
+  });
+  it("matches any one of several patterns", () => {
+    expect(isProductionTarget("srv", "staging", ["prod", "staging"])).toBe(true);
   });
 });

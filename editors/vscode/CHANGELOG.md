@@ -2,6 +2,17 @@
 
 ## 0.3.0 — preview
 
+- **F5 follows the active file**: the generated launch.json config and a new
+  **"Debug T-SQL procedure (current file)"** entry in the Run dropdown both use
+  `${file}`, so F5 debugs the `.sql` you have open instead of a path pinned the
+  first time. (A launch.json with an explicit `program` is still respected.)
+- **Result-set grid**: rows a step returns open in a **Result Set** webview
+  beside the editor (headers, `NULL` marked, theme-aware, `(truncated)` note)
+  and are also printed to the Debug Console. Driven by the adapter's
+  `tsqlFabricResultSet` custom event.
+- **Production guard**: `tsqlFabric.productionWarehouses` flags warehouses (by
+  name or endpoint substring) as production; debugging one pops a modal
+  confirmation first, and the status bar shows an amber **Fabric (PROD)** badge.
 - **Faster startup**: a database token is acquired once and passed to the
   Python processes, skipping the Azure CLI cold start on every connection
   (first connect ~4.7s → ~0.6s); warmed in the background on activation.

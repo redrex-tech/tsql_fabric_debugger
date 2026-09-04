@@ -226,6 +226,12 @@
           "type": "number",
           "default": 0,
           "markdownDescription": "Seconds a single step may run before it is cancelled. `0` = no limit. Set a limit on production to bound heavy statements."
+        },
+        "tsqlFabric.productionWarehouses": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Warehouse names or endpoint substrings you consider **production**. Debugging one of these asks for confirmation first (a debug session holds locks while paused) and marks the status bar. Example: `[\"wh_prod\", \"prod.datawarehouse\"]`."
         }
       }
     },

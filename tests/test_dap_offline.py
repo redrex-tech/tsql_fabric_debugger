@@ -463,3 +463,32 @@ def test_logpoint_message_renders_plain(fake_session):
     rendered = [l for l in lines if "logpoint (line 4)" in l]
     assert rendered and "n=5 out=NULL done" in rendered[0]   # plain, NULL not None
     dbg.close()
+
+
+def test_dap_emits_result_set_event_and_console(fake_session, tmp_path):
+    # a procedure that produces a diagnostic SELECT -> result-set event + console
+    sql = tmp_path / "diag.sql"
+    sql.write_text(
+        "CREATE PROCEDURE dbo.d @o INT OUTPUT AS\n"
+        "BEGIN\n"
+        "    SELECT 1 AS a, N'x' AS b;\n"
+        "    SET @o = 7;\n"
+        "END;\n", encoding="utf-8")
+    fake_session.turn(resultsets=[(["a", "b"], [[1, "x"]])])   # the SELECT step
+    fake_session.turn(updates={"@O": 7})                       # SET @o = 7
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", {"program": str(sql), "params": {}, "server": "s",
+                    "database": "d", "stopOnEntry": False}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    rs = [m for m in messages if m.get("type") == "event"
+          and m.get("event") == "tsqlFabricResultSet"]
+    assert rs, "no tsqlFabricResultSet event"
+    body = rs[0]["body"]
+    assert body["columns"] == ["a", "b"] and body["rows"] == [[1, "x"]]
+    # also printed to the console
+    console = "".join(e["body"]["output"] for e in messages
+                      if e.get("event") == "output")
+    assert "result set" in console and "a | b" in console

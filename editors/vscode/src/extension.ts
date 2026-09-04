@@ -7,7 +7,7 @@
 // workspace's notebooks, and debug the project's .sql files.
 
 import * as vscode from "vscode";
-import { coerceParam, matchVariables } from "./util";
+import { coerceParam, matchVariables, isProductionTarget } from "./util";
 import {
   FabricAuthError,
   findWorkspaceForServer,
@@ -42,10 +42,16 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(status);
   refreshStatus(status);
 
+  const configProvider = new TsqlFabricConfigurationProvider();
   context.subscriptions.push(
+    // Initial: resolves launch.json configs and seeds the generated snippet.
+    vscode.debug.registerDebugConfigurationProvider(TYPE, configProvider),
+    // Dynamic: adds "Debug T-SQL procedure (current file)" to the F5 dropdown,
+    // so the active .sql can always be debugged without editing launch.json.
     vscode.debug.registerDebugConfigurationProvider(
       TYPE,
-      new TsqlFabricConfigurationProvider(),
+      configProvider,
+      vscode.DebugConfigurationProviderTriggerKind.Dynamic,
     ),
     vscode.debug.registerDebugAdapterDescriptorFactory(
       TYPE,
@@ -169,6 +175,16 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onDidDelete(() => filesProvider.refresh());
   context.subscriptions.push(watcher);
 
+  // Show result sets the procedure produces in a grid webview.
+  const grid = new ResultSetGrid(context);
+  context.subscriptions.push(
+    vscode.debug.onDidReceiveDebugSessionCustomEvent((e) => {
+      if (e.event === "tsqlFabricResultSet") {
+        grid.show(e.body as ResultSetPayload);
+      }
+    }),
+  );
+
   // Warm the database token in the background when a warehouse is already
   // configured, so the first debug/procedure-list does not pay the az cold
   // start. Best-effort — failures are ignored (auth surfaces later).
@@ -193,16 +209,109 @@ export function deactivate(): void {
   /* nothing to clean up: each session owns its own adapter process */
 }
 
+// ---------------------------------------------------------------------------
+// Result-set grid: a webview that shows the rows a procedure produced at a
+// step, refreshed as new result sets arrive during the debug session.
+// ---------------------------------------------------------------------------
+interface ResultSetPayload {
+  line: number;
+  columns: string[];
+  rows: unknown[][];
+  truncated: boolean;
+}
+
+class ResultSetGrid {
+  private panel: vscode.WebviewPanel | undefined;
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  show(payload: ResultSetPayload): void {
+    if (!this.panel) {
+      this.panel = vscode.window.createWebviewPanel(
+        "tsqlFabricResultSet",
+        "T-SQL Fabric: Result Set",
+        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+        { enableScripts: false },
+      );
+      this.panel.onDidDispose(
+        () => (this.panel = undefined),
+        null,
+        this.context.subscriptions,
+      );
+    }
+    this.panel.webview.html = renderGrid(payload);
+    this.panel.title = `Result Set (line ${payload.line})`;
+    this.panel.reveal(vscode.ViewColumn.Beside, true);
+  }
+}
+
+function esc(v: unknown): string {
+  if (v === null || v === undefined) {
+    return "<span class='null'>NULL</span>";
+  }
+  return String(v).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c] as string,
+  );
+}
+
+function renderGrid(p: ResultSetPayload): string {
+  const head = p.columns.map((c) => `<th>${esc(c)}</th>`).join("");
+  const body = p.rows
+    .map((r) => `<tr>${r.map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`)
+    .join("");
+  const note = p.truncated
+    ? `<p class="note">Showing the first ${p.rows.length} rows (truncated).</p>`
+    : `<p class="note">${p.rows.length} row(s).</p>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body { font-family: var(--vscode-editor-font-family, monospace); padding: 8px; color: var(--vscode-foreground); }
+  h3 { margin: 0 0 6px; font-weight: 600; }
+  .note { color: var(--vscode-descriptionForeground); margin: 4px 0 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border: 1px solid var(--vscode-panel-border, #8884); padding: 3px 8px; text-align: left; white-space: pre; }
+  th { position: sticky; top: 0; background: var(--vscode-editorWidget-background); }
+  tr:nth-child(even) td { background: var(--vscode-list-hoverBackground, #8881); }
+  .null { color: var(--vscode-descriptionForeground); font-style: italic; }
+</style></head><body>
+<h3>Result set at line ${p.line}</h3>
+${note}
+<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+</body></html>`;
+}
+
 function refreshStatus(status: vscode.StatusBarItem): void {
-  const db = vscode.workspace
-    .getConfiguration("tsqlFabric")
-    .get<string>("database");
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const db = cfg.get<string>("database");
   if (db) {
-    status.text = `$(database) Fabric: ${db}`;
-    status.tooltip = "T-SQL Fabric — click to switch warehouse";
+    const server = cfg.get<string>("server") ?? "";
+    const prod = isProductionTarget(
+      server,
+      db,
+      cfg.get<string[]>("productionWarehouses") ?? [],
+    );
+    if (prod) {
+      status.text = `$(alert) Fabric (PROD): ${db}`;
+      status.tooltip =
+        "T-SQL Fabric — PRODUCTION warehouse. Debugging asks for confirmation.";
+      status.backgroundColor = new vscode.ThemeColor(
+        "statusBarItem.warningBackground",
+      );
+    } else {
+      status.text = `$(database) Fabric: ${db}`;
+      status.tooltip = "T-SQL Fabric — click to switch warehouse";
+      status.backgroundColor = undefined;
+    }
   } else {
     status.text = "$(plug) Fabric: connect";
     status.tooltip = "T-SQL Fabric — click to connect to a warehouse";
+    status.backgroundColor = undefined;
   }
   status.show();
 }
@@ -484,6 +593,22 @@ function reportError(err: unknown): void {
 class TsqlFabricConfigurationProvider
   implements vscode.DebugConfigurationProvider
 {
+  // The configuration VS Code writes into launch.json (via "Add Configuration"
+  // / "create a launch.json file") and the entry shown in the F5 dropdown.
+  // Uses ${file} so it always debugs the *active* editor, never a pinned path.
+  provideDebugConfigurations(): vscode.DebugConfiguration[] {
+    return [
+      {
+        type: TYPE,
+        request: "launch",
+        name: "Debug T-SQL procedure (current file)",
+        program: "${file}",
+        params: {},
+        stopOnEntry: true,
+      },
+    ];
+  }
+
   async resolveDebugConfiguration(
     _folder: vscode.WorkspaceFolder | undefined,
     config: vscode.DebugConfiguration,
@@ -549,6 +674,22 @@ class TsqlFabricConfigurationProvider
     }
     if (config.stepTimeout === undefined && t.stepTimeout !== undefined) {
       config.stepTimeout = t.stepTimeout;
+    }
+
+    // Production guard: debugging holds a transaction (and locks) open while
+    // paused. If this warehouse is flagged production, make the user confirm.
+    const prodPatterns = cfg.get<string[]>("productionWarehouses") ?? [];
+    if (isProductionTarget(config.server, config.database, prodPatterns)) {
+      const go = await vscode.window.showWarningMessage(
+        `⚠ "${config.database}" is flagged as PRODUCTION. A debug session ` +
+          "holds a transaction open (locking rows/schema) until it ends. " +
+          "Debug against production anyway?",
+        { modal: true },
+        "Debug production",
+      );
+      if (go !== "Debug production") {
+        return undefined; // user backed out
+      }
     }
     return config;
   }

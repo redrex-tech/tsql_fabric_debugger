@@ -87,3 +87,20 @@ export function logpointExpressions(message: string): string[] {
   }
   return out;
 }
+
+// Decide whether a warehouse (by name or SQL endpoint) is one the user flagged
+// as production. Matching is case-insensitive substring against each pattern,
+// tested against both the database name and the server endpoint, so a pattern
+// like "prod" or "xxxx.datawarehouse" catches either. Empty/blank patterns are
+// ignored so a stray "" in the list never flags everything as production.
+export function isProductionTarget(
+  server: string,
+  database: string,
+  patterns: string[],
+): boolean {
+  const hay = `${database}\n${server}`.toLowerCase();
+  return patterns.some((p) => {
+    const needle = p.trim().toLowerCase();
+    return needle.length > 0 && hay.includes(needle);
+  });
+}

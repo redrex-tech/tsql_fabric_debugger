@@ -27,6 +27,9 @@ by a feature-gap analysis:
   extension), nvim-dap or any DAP client: gutter/conditional/hit-count
   breakpoints, step over/into/out, variables pane, hover/REPL evaluation,
   CATCH-handled-error exception filter. Never commits; disconnect rolls back.
+  Result sets a step returns are printed to the Debug Console as a text table
+  and emitted as a `tsqlFabricResultSet` custom event
+  (`{line, columns, rows, truncated}`) for clients that render a grid.
 
 Hardening from a 4-persona review (data engineer, data analyst, QA, DBA):
 expression validation that blocks batch-breaking typos (comments, `;`,
