@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.3 — 2026-09-04
+
+Usability (driven by end-user feedback):
+
+- **`proc_name=`**: debug a DEPLOYED procedure by name — no more manual
+  `OBJECT_DEFINITION` boilerplate. `TSQLDebugger(proc_name="pck_am.prd_x", ...)`
+  and `run_procedure(proc_name=..., ...)` fetch the source straight from the
+  warehouse on a short-lived session (a name without schema resolves to dbo).
+  Exactly one of `sql_file`/`sql_text`/`proc_name` must be given.
+- **`fetch_source(proc_name, server, database)`** is now public, for when you
+  want the source text itself.
+
 ## 0.2.2 — 2026-09-04
 
 Usability (driven by end-user feedback):

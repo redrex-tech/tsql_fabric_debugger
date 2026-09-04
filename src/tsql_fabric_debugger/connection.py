@@ -27,6 +27,28 @@ def _get_token():
         return AzureCliCredential().get_token(TOKEN_SCOPE).token
 
 
+def fetch_source(proc_name: str, server: str | None = None,
+                 database: str | None = None) -> str:
+    """Fetch the deployed source of a procedure straight from the warehouse.
+
+    Opens a short-lived autocommit session, reads OBJECT_DEFINITION and closes.
+    A name without schema resolves to dbo. Raises ValueError when the object
+    does not exist or the caller lacks VIEW DEFINITION permission.
+    """
+    conn = connect(server, database, autocommit=True)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT OBJECT_DEFINITION(OBJECT_ID(?));", (proc_name,))
+        row = cur.fetchone()
+        source = row[0] if row else None
+    finally:
+        conn.close()
+    if not source:
+        raise ValueError(f"{proc_name}: source not available "
+                         "(missing object or no VIEW DEFINITION permission).")
+    return source
+
+
 def connect(server: str | None = None, database: str | None = None,
             autocommit: bool = True, lock_timeout: int | None = None):
     """Open an authenticated (Entra ID) connection. One session = one debug.

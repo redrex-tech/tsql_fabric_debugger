@@ -23,7 +23,7 @@ nothing persists in the Warehouse unless close(commit=True).
 import re
 import time
 
-from .connection import connect
+from .connection import connect, fetch_source
 from .parser import (
     eval_literal,
     extract_declares,
@@ -55,10 +55,12 @@ class TSQLDebugger:
       - Diagnosis: set_log_level("full") and show_detail() to see the whole
         command, the error and the executed SQL batch.
 
-    Main parameters: sql_file OR sql_text (the original procedure,
-    untouched), params (test values, e.g. {"@year": 2015}), server and
-    database (or the FABRIC_TSQL_SERVER/FABRIC_TSQL_DATABASE env vars).
-    echo redirects console output (default: print).
+    Main parameters: exactly one of sql_file, sql_text (the original
+    procedure, untouched) or proc_name (fetches the DEPLOYED source straight
+    from the warehouse via OBJECT_DEFINITION — no schema means dbo); params
+    (test values, e.g. {"@year": 2015}), server and database (or the
+    FABRIC_TSQL_SERVER/FABRIC_TSQL_DATABASE env vars). echo redirects
+    console output (default: print).
 
     Prefer the context-manager form — it guarantees ROLLBACK + close even on
     exceptions, so no orphan session is left holding locks on the warehouse:
@@ -74,6 +76,7 @@ class TSQLDebugger:
     """
 
     def __init__(self, sql_file: str | None = None, sql_text: str | None = None,
+                 proc_name: str | None = None,
                  params: dict | None = None,
                  server: str | None = None, database: str | None = None, autocommit: bool = False,
                  log_level: str = "simple", stop_on_error: bool = True,
@@ -81,10 +84,15 @@ class TSQLDebugger:
                  step_timeout: int | None = None, max_result_rows: int = 50,
                  offload_threshold: int = 200_000, history_batches: int | None = None,
                  lock_timeout: int | None = None, echo=print):
+        if sum(x is not None for x in (sql_file, sql_text, proc_name)) > 1:
+            raise ValueError("Provide only one of sql_file, sql_text or proc_name.")
         if sql_text is None:
-            if sql_file is None:
-                raise ValueError("Provide sql_file or sql_text.")
-            sql_text = read_sql_file(sql_file)
+            if proc_name is not None:
+                sql_text = fetch_source(proc_name, server, database)
+            elif sql_file is not None:
+                sql_text = read_sql_file(sql_file)
+            else:
+                raise ValueError("Provide sql_file, sql_text or proc_name.")
         self._sql = sql_text
         self._server = server
         self._database = database

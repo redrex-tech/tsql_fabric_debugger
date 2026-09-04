@@ -70,16 +70,17 @@ def split_script(sql_text: str) -> list:
     return parts
 
 
-def run_procedure(sql_file=None, sql_text=None, params=None, server=None, database=None,
-                  commit=False, save_csv=None, **kwargs):
+def run_procedure(sql_file=None, sql_text=None, proc_name=None, params=None,
+                  server=None, database=None, commit=False, save_csv=None, **kwargs):
     """Run the whole procedure step by step and return the log. ROLLBACK by default.
 
-    Same engine as TSQLDebugger, without interaction. Use save_csv to persist
-    the log (works with or without pandas) and commit=True to keep the
-    effects in the Warehouse.
+    Same engine as TSQLDebugger, without interaction — including proc_name,
+    which fetches the deployed source straight from the warehouse. Use
+    save_csv to persist the log (works with or without pandas) and
+    commit=True to keep the effects in the Warehouse.
     """
-    dbg = TSQLDebugger(sql_file=sql_file, sql_text=sql_text, params=params,
-                       server=server, database=database, **kwargs)
+    dbg = TSQLDebugger(sql_file=sql_file, sql_text=sql_text, proc_name=proc_name,
+                       params=params, server=server, database=database, **kwargs)
     try:
         dbg.run_all()
     finally:
