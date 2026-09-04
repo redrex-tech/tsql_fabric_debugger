@@ -65,3 +65,28 @@ jobs:
         with:
           name: dist
           path: dist/*
+
+  vscode-extension:
+    name: vscode extension (test + mutation)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+      - name: Type-check
+        run: npm run compile-check
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      - name: Mutation testing (Stryker)
+        run: npm run mutation

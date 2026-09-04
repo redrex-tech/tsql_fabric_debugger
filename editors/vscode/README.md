@@ -123,9 +123,15 @@ variable capture, step-into, CATCH emulation — is the Python engine.
 
 ```bash
 npm install
-npm run build       # bundle to dist/extension.js (npm run watch to iterate)
-npm run package     # produce the .vsix
+npm run build        # bundle to dist/extension.js (npm run watch to iterate)
+npm run package      # produce the .vsix
+npm test             # unit tests (vitest) for the pure logic in src/util.ts
+npm run mutation     # mutation testing (Stryker) — 100% score enforced
 ```
+
+The pure, `vscode`-free logic (parameter coercion, introspection-output
+parsing, variable matching, logpoint expressions) lives in `src/util.ts` and
+is unit- and mutation-tested (`test/util.test.ts`, `stryker.conf.json`).
 
 Press F5 in this folder (the "Run extension (dev)" config) to launch an
 Extension Development Host with the extension loaded.

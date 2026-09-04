@@ -7,6 +7,7 @@
 // workspace's notebooks, and debug the project's .sql files.
 
 import * as vscode from "vscode";
+import { coerceParam, matchVariables } from "./util";
 import {
   FabricAuthError,
   findWorkspaceForServer,
@@ -145,15 +146,9 @@ export function activate(context: vscode.ExtensionContext): void {
         const out: vscode.InlineValue[] = [];
         for (let line = viewport.start.line; line <= viewport.end.line; line++) {
           const text = document.lineAt(line).text;
-          for (const m of text.matchAll(/@{1,2}\w+/g)) {
-            const start = m.index ?? 0;
-            const range = new vscode.Range(
-              line,
-              start,
-              line,
-              start + m[0].length,
-            );
-            out.push(new vscode.InlineValueVariableLookup(range, m[0], false));
+          for (const v of matchVariables(text)) {
+            const range = new vscode.Range(line, v.start, line, v.end);
+            out.push(new vscode.InlineValueVariableLookup(range, v.name, false));
           }
         }
         return out;
@@ -608,29 +603,6 @@ async function promptForParams(
   return values;
 }
 
-// Match the launch.json params semantics: quoted = string; NULL = null; a
-// strict integer WITHOUT leading zeros -> int; a strict decimal -> float;
-// anything else stays a string. Leading-zero forms (codes like "00123") stay
-// strings so they are not silently truncated.
-function coerceParam(raw: string): unknown {
-  const s = raw.trim();
-  if (s.toUpperCase() === "NULL") {
-    return null;
-  }
-  if (s.length >= 2 && s[0] === s[s.length - 1] && (s[0] === "'" || s[0] === '"')) {
-    return s.slice(1, -1);
-  }
-  if (/^[+-]?(0|[1-9]\d*)$/.test(s)) {
-    // keep BIGINT exact: only use a JS number when it round-trips, else pass
-    // the digits through as a string (the engine binds it correctly)
-    const n = Number(s);
-    return Number.isSafeInteger(n) ? n : s;
-  }
-  if (/^[+-]?(0|[1-9]\d*|)\.\d+$/.test(s)) {
-    return parseFloat(s);
-  }
-  return raw;
-}
 
 // ---------------------------------------------------------------------------
 // Sidebar: the connected warehouse's deployed procedures, grouped by schema.

@@ -3,6 +3,7 @@
 // the Python library already requires (AzureCliCredential) — one `az login`.
 
 import { execFile } from "node:child_process";
+import { parseIntrospectResult } from "./util";
 
 const FABRIC_API = "https://api.fabric.microsoft.com/v1";
 const FABRIC_RESOURCE = "https://api.fabric.microsoft.com";
@@ -25,27 +26,12 @@ function runIntrospect(python: string, args: string[]): Promise<unknown> {
       ["-m", "tsql_fabric_debugger.introspect", ...args],
       { timeout: 60000, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        let data: unknown;
-        try {
-          data = JSON.parse(stdout);
-        } catch {
-          data = undefined;
+        const r = parseIntrospectResult(stdout, err != null, String(stderr || err || ""));
+        if ("error" in r) {
+          reject(new Error(r.error));
+        } else {
+          resolve(r.ok);
         }
-        if (data && typeof data === "object" && "error" in data) {
-          reject(new Error(String((data as { error: unknown }).error)));
-          return;
-        }
-        if (err) {
-          reject(new Error(String(stderr || err).trim()));
-          return;
-        }
-        if (data === undefined) {
-          reject(
-            new Error(`introspect: unexpected output: ${stdout.slice(0, 200)}`),
-          );
-          return;
-        }
-        resolve(data);
       },
     );
   });
