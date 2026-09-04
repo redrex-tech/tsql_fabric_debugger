@@ -186,9 +186,9 @@ async function connectToWarehouse(
         }
 
         const cfg = vscode.workspace.getConfiguration("tsqlFabric");
-        const target = vscode.workspace.workspaceFolders
-          ? vscode.ConfigurationTarget.Workspace
-          : vscode.ConfigurationTarget.Global;
+        // Global by default: it shows in the (default) User tab of Settings and
+        // applies in every folder — most people debug one warehouse.
+        const target = vscode.ConfigurationTarget.Global;
         await cfg.update("server", wh.connectionString, target);
         await cfg.update("database", wh.label, target);
         await context.workspaceState.update(WS_KEY, ws.id);
