@@ -251,7 +251,8 @@ TSQLDebugger(
     database=None,            # warehouse name; falls back to $FABRIC_TSQL_DATABASE
     autocommit=False,         # True = every step persists immediately (warned)
     log_level="simple",       # "full" = whole commands, values, batch on error
-    stop_on_error=True,       # stop the sequential run on an unhandled error
+    stop_on_error=True,       # False: continue past errors; "any": run_all() also
+                              #   pauses on CATCH-handled errors
     preview_chars=500,        # command truncation in the log
     max_loop_iterations=1000, # step_into guard for WHILE loops
     step_timeout=None,        # seconds per step (None = unlimited)
@@ -327,7 +328,8 @@ Navigation:
 | `list_steps()` | Print the numbered step plan without executing. `*` marks the cursor; indentation marks sub-steps from `step_into()`. Numbers change after an expansion — re-list before using them. |
 | `step()` | Run the next step ("step over": a whole `IF`/`WHILE` at once) and advance the cursor. Returns the log entry — on failure, the *error* entry, after emulating the CATCH. |
 | `step_into()` | Enter the next step when it is an `IF`/`WHILE` (see §2.6); otherwise identical to `step()`. |
-| `run_all(into=False)` | Run to the end, or until an unhandled error. Returns `log_df()`. `into=True` expands every IF/WHILE the `step_into()` way — each branch taken and each loop iteration becomes its own logged step. |
+| `step_out()` | Finish the current context and stop one level up: the remaining sub-steps of an expanded block (a WHILE stops at its re-evaluation), or the whole active child debugger (OUTPUTs collected). |
+| `run_all(into=False)` | Run to the end, or until an unhandled error (`stop_on_error="any"` in the constructor also pauses on CATCH-handled errors, after the CATCH emulation). Returns `log_df()`. `into=True` expands every IF/WHILE the `step_into()` way — each branch taken and each loop iteration becomes its own logged step. |
 | `run_until(target \| line=n)` | Run up to a step inclusive — the breakpoint idiom. `target` may be a step **number**, a **text** fragment (`run_until("MAX(SEQREC)")`) or `line=<n>`. |
 | `find_step(contains=... \| line=...)` | Return a step number by a text fragment of its command or by its file line — instead of hand-writing `next(i for i, s in enumerate(...))`. |
 | `jump_to(target \| line=n)` | Move the cursor to a step without executing anything before it. `target` may be a step **number**, a **text** fragment (`jump_to("@year = 2013")`) or `line=<n>`. |
@@ -350,7 +352,7 @@ Watches and breakpoints:
 |---|---|
 | `watch(expr, name=None)` | Track a T-SQL expression after every step — it is appended to each capture batch (e.g. `"(SELECT COUNT(*) FROM stg.t)"`). Values echo per step and are returned by `watches()`. A watch that references a dropped object fails the next step — `unwatch()` it. |
 | `unwatch(name=None)` | Remove one watch, or all of them. |
-| `break_at(line, condition=None)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables. `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
+| `break_at(line, condition=None, hits=None, once=False)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables; `hits=N` fires from the Nth pass with the condition true (the loop-iteration counter), `once=True` removes the breakpoint after it fires. `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
 | `clear_breaks(line=None)` / `breaks()` | Remove/inspect breakpoints. |
 
 Nested EXEC:
@@ -370,6 +372,9 @@ Inspection:
 | `show_error()` | `show_detail()` of that entry — the one-call idiom after a failed `run_all()`. Prints a note and returns `None` if nothing failed. |
 | `last_results(step_no=None)` | Result sets the procedure itself produced in that entry, as DataFrames (`df.attrs["truncated"]` marks the `max_result_rows` cut). |
 | `set_log_level(level)` | Switch `"simple"`/`"full"` mid-debug. |
+| `eval(expr)` | One-shot server-side evaluation of a T-SQL expression with the CURRENT variables (`eval("@a * @b")`). Logged as an `eval` entry; a failing expression reports and returns None (data effects of prior steps roll back, variables survive). |
+| `stack()` | The current frame stack, outermost first: procedures in the nested-EXEC chain plus the expanded-block frames of the cursor (loop iteration included). `*` marks the active frame. |
+| `log_at(line, expr=None)` / `clear_logpoints()` / `logpoints()` | Logpoints: echo when a FILE line executes — the expression's server-side value (`?? logpoint = ...`) or a passage marker — without ever stopping. One per line. |
 
 Lifecycle:
 

@@ -79,7 +79,7 @@ class TSQLDebugger:
                  proc_name: str | None = None,
                  params: dict | None = None,
                  server: str | None = None, database: str | None = None, autocommit: bool = False,
-                 log_level: str = "simple", stop_on_error: bool = True,
+                 log_level: str = "simple", stop_on_error: "bool | str" = True,
                  preview_chars: int = 500, max_loop_iterations: int = 1000,
                  step_timeout: int | None = None, max_result_rows: int = 50,
                  offload_threshold: int = 200_000, history_batches: int | None = None,
@@ -107,10 +107,14 @@ class TSQLDebugger:
         self._offload_threshold = offload_threshold  # chars; bigger strings live server-side
         self._history_batches = history_batches      # keep batch text for the last N entries
         self._echo = echo
+        if stop_on_error not in (True, False, "any"):
+            raise ValueError('stop_on_error must be True, False or "any".')
         self._watches = {}        # name -> expression, appended to every capture
         self._watch_values = {}   # name -> last captured value
         self._watch_seq = 0
-        self._breaks = {}         # file line -> condition (None = unconditional)
+        self._breaks = {}         # file line -> {"condition","hits","once","count"}
+        self._logpoints = {}      # file line -> expression | None (echo, never stop)
+        self._parent = None       # set on a child debugger (nested EXEC step-into)
         self._break_resume = None
         self._offload_synced = {} # var key -> value currently stored server-side
         self._state_table_ok = False
@@ -569,6 +573,7 @@ class TSQLDebugger:
 
     def _run_one(self, step, emulate_catch, finalize):
         log_before = len(self._log)
+        lp_temp = self._arm_logpoint(step)
         try:
             entry, returned = self._execute_step(step)
             if returned and finalize:
@@ -589,6 +594,29 @@ class TSQLDebugger:
                 raise
             self._handle_step_error(step, emulate_catch, finalize)
             return error_entry
+        finally:
+            self._disarm_logpoint(lp_temp)
+
+    _LOGPOINT_WATCH = "logpoint"
+
+    def _arm_logpoint(self, step):
+        """Attach the line's logpoint (if any) to this step's capture as a
+        temporary watch; returns the watch key to disarm, or None."""
+        if not self._logpoints or step["line"] not in self._logpoints:
+            return None
+        expr = self._logpoints[step["line"]]
+        if expr is None:
+            self._echo(f"      .. logpoint: passed line {step['line']}")
+            return None
+        if self._LOGPOINT_WATCH in self._watches:
+            return None      # a real watch owns the name — do not clobber it
+        self._watches[self._LOGPOINT_WATCH] = expr
+        return self._LOGPOINT_WATCH
+
+    def _disarm_logpoint(self, key):
+        if key is not None:
+            self._watches.pop(key, None)
+            self._watch_values.pop(key, None)
 
     def _handle_step_error(self, step, emulate_catch, finalize):
         if step["kind"].endswith("_block"):
@@ -637,7 +665,7 @@ class TSQLDebugger:
         elif finalize:
             # no CATCH: the error is unhandled — it would abort the procedure
             # and propagate to a caller (nested-EXEC parent)
-            self._finished = self._stop_on_error
+            self._finished = bool(self._stop_on_error)
             if self._finished:
                 self._propagated_error = (self._error_msg, self._error_number,
                                           self._error_line)
@@ -815,6 +843,7 @@ class TSQLDebugger:
                 lock_timeout=self._lock_timeout,
                 echo=lambda m: self._echo("    » " + str(m)),
             )
+            child._parent = self
         except ValueError as exc:
             self._echo(f"[CHILD] cannot parse {call['proc']} ({exc}); stepping over.")
             return self.step()
@@ -949,6 +978,45 @@ class TSQLDebugger:
         self._echo("Child discarded — the EXEC step is still pending "
                    "(step() runs it whole, step_into() re-enters).")
 
+    def step_out(self) -> dict | None:
+        """Finish the current context and stop one level up ("step out").
+
+        Inside an expanded IF/WHILE (after step_into): runs the remaining
+        sub-steps of the block with step() and stops at the first step back
+        at the enclosing level — for a WHILE, that is the loop's re-evaluation
+        step. With an active child debugger (nested EXEC): finishes the child
+        and collects its OUTPUT values back into this session. At the top
+        level there is nothing to step out of — use run_all().
+
+        Returns the last executed log entry (or None if nothing ran). An
+        unhandled error stops it exactly as it stops step().
+        """
+        if self._child is not None:
+            if not self._child_done():
+                self._echo("[CHILD] step_out: finishing the child debugger.")
+                self._child.run_all()
+                if not self._child_done():
+                    return None       # the child paused (breakpoint/error) — stay
+            return self._finish_child()
+        if self._finished or self._pos >= len(self._steps):
+            self._echo("Nothing to step out of — the debug already finished.")
+            return None
+        depth = self._steps[self._pos].get("depth", 0)
+        if depth == 0:
+            if self._parent is not None:
+                entry = None
+                while (not self._finished and self._pos < len(self._steps)):
+                    entry = self.step()
+                return entry           # child at top level: finish the child
+            self._echo("Already at the top level — nothing to step out of. "
+                       "Use run_all() to run to the end.")
+            return None
+        entry = None
+        while (not self._finished and self._pos < len(self._steps)
+               and self._steps[self._pos].get("depth", 0) >= depth):
+            entry = self.step()
+        return entry
+
     def run_step(self, n: int, emulate_catch: bool = False) -> dict | None:
         """Run ONLY step n (1-based), with the current variable state.
 
@@ -1074,20 +1142,34 @@ class TSQLDebugger:
         return dict(self._watch_values)
 
     # -- breakpoints --------------------------------------------------------
-    def break_at(self, line: int, condition: str | None = None) -> None:
+    def break_at(self, line: int, condition: str | None = None,
+                 hits: int | None = None, once: bool = False) -> None:
         """Stop run_all() BEFORE executing any step at this FILE line.
 
         File lines are stable across step_into() expansions (unlike step
         numbers). An optional T-SQL condition is evaluated server-side with
         the current variables: dbg.break_at(42, "@code = 31000").
 
+        hits=N stops from the Nth time the line is reached (with the
+        condition true, when there is one) — the loop-iteration counter you
+        would otherwise emulate with a condition on the loop variable.
+        once=True removes the breakpoint after it fires.
+
         The line must hold a statement or a block header (IF/WHILE line) —
         a breakpoint on a BEGIN/END/blank line never matches any step.
         run_all() auto-expands blocks whose BODY contains a breakpoint.
         """
-        self._breaks[line] = condition
+        if hits is not None and hits < 1:
+            raise ValueError("hits must be >= 1.")
+        self._breaks[line] = {"condition": condition, "hits": hits,
+                              "once": once, "count": 0}
+        extras = [f"when {condition}"] if condition else []
+        if hits is not None:
+            extras.append(f"from hit #{hits}")
+        if once:
+            extras.append("once")
         self._echo(f"breakpoint at line {line}"
-                   + (f" when {condition}" if condition else ""))
+                   + (" " + ", ".join(extras) if extras else ""))
 
     def clear_breaks(self, line: int | None = None) -> None:
         """Remove the breakpoint at one line, or all of them."""
@@ -1099,8 +1181,38 @@ class TSQLDebugger:
             self._echo(f"breakpoint at line {line} removed.")
 
     def breaks(self) -> dict:
-        """Registered breakpoints: {line: condition | None}."""
-        return dict(self._breaks)
+        """Registered breakpoints: {line: {"condition","hits","once","count"}}."""
+        return {line: dict(bp) for line, bp in self._breaks.items()}
+
+    # -- logpoints ----------------------------------------------------------
+    def log_at(self, line: int, expr: str | None = None) -> None:
+        """Echo when execution passes a FILE line — without ever stopping.
+
+        With an expression, its server-side value at that step is printed
+        (`?? logpoint = ...`), exactly like a watch scoped to one line:
+        dbg.log_at(8, "@fat"). Without one, a passage marker is printed.
+        One logpoint per line; calling again replaces it.
+        """
+        if expr is not None:
+            toks = scan(expr)
+            if sum(1 for t in toks if t.get("u") == "(") != \
+                    sum(1 for t in toks if t.get("u") == ")"):
+                raise ValueError("Unbalanced parentheses in logpoint expression.")
+        self._logpoints[line] = expr
+        self._echo(f"logpoint at line {line}" + (f": {expr}" if expr else ""))
+
+    def clear_logpoints(self, line: int | None = None) -> None:
+        """Remove the logpoint at one line, or all of them."""
+        if line is None:
+            self._logpoints.clear()
+            self._echo("All logpoints removed.")
+        else:
+            self._logpoints.pop(line, None)
+            self._echo(f"logpoint at line {line} removed.")
+
+    def logpoints(self) -> dict:
+        """Registered logpoints: {line: expression | None}."""
+        return dict(self._logpoints)
 
     # -- state snapshots ----------------------------------------------------
     def save_state(self, path: str | None = None) -> dict:
@@ -1298,6 +1410,9 @@ class TSQLDebugger:
             self._echo("No condition was true and there is no ELSE — the block does nothing.")
             return None
         subs = self._sub_steps(chosen["body"], step)
+        frame = " ".join(step["text"].split())[:60]
+        for sub in subs:
+            sub["frames"] = list(step.get("frames", [])) + [frame]
         self._steps[self._pos:self._pos] = subs
         self._echo(f"Block expanded into {len(subs)} sub-step(s) — step() runs the first one.")
         return subs
@@ -1328,8 +1443,10 @@ class TSQLDebugger:
             self._echo(f"[ABORTED] WHILE exceeded max_loop_iterations={self._max_loop_iterations}.")
             return None
         subs = self._sub_steps(branch["body"], step)
+        frame = " ".join(step["text"].split())[:60] + f" — iteration {iteration}"
         for sub in subs:
             sub["loop_key"] = loop_key
+            sub["frames"] = list(step.get("frames", [])) + [frame]
         next_round = dict(step)
         next_round["iteration"] = iteration + 1
         self._steps[self._pos:self._pos] = subs + [next_round]
@@ -1342,6 +1459,11 @@ class TSQLDebugger:
 
         Breakpoints (break_at) stop BEFORE the matching step executes; calling
         run_all() again resumes past the one it stopped at.
+
+        stop_on_error="any" (constructor) also pauses on errors a CATCH
+        handled: the CATCH emulation has already run when it pauses, so
+        show_error() and show_vars() see the handled failure; run_all()
+        resumes after END CATCH.
 
         into=True walks the whole procedure the way step_into() does: every
         IF/WHILE is expanded so each branch taken and each loop iteration
@@ -1380,19 +1502,34 @@ class TSQLDebugger:
                     self.step_into()
                     continue
             if self._breaks and self._break_resume != self._pos:
-                condition = self._breaks.get(step["line"], "__no_break__")
-                if condition != "__no_break__":
-                    hit = True if condition is None else \
-                        self._eval_condition(condition, step["line"])
+                bp = self._breaks.get(step["line"])
+                if bp is not None:
+                    hit = True if bp["condition"] is None else \
+                        self._eval_condition(bp["condition"], step["line"])
                     if hit:
-                        self._break_resume = self._pos
-                        self._echo(f"[BREAK] stopped BEFORE line {step['line']} "
-                                   f"(step {self._pos + 1})"
-                                   + (f" — condition {condition} is true" if condition else "")
-                                   + ". step()/run_all() to continue.")
-                        return self.log_df()
+                        bp["count"] += 1
+                        if bp["hits"] is None or bp["count"] >= bp["hits"]:
+                            self._break_resume = self._pos
+                            reasons = []
+                            if bp["condition"]:
+                                reasons.append(f"condition {bp['condition']} is true")
+                            if bp["hits"] is not None:
+                                reasons.append(f"hit #{bp['count']}")
+                            if bp["once"]:
+                                self._breaks.pop(step["line"], None)
+                            self._echo(f"[BREAK] stopped BEFORE line {step['line']} "
+                                       f"(step {self._pos + 1})"
+                                       + (" — " + ", ".join(reasons) if reasons else "")
+                                       + ". step()/run_all() to continue.")
+                            return self.log_df()
             self._break_resume = None
-            self.step_into() if into else self.step()
+            entry = self.step_into() if into else self.step()
+            if (self._stop_on_error == "any" and isinstance(entry, dict)
+                    and entry.get("status") == "ERROR" and not self._finished):
+                self._echo("[BREAK] error handled by a CATCH (stop_on_error='any') — "
+                           "the CATCH was emulated; paused before continuing after "
+                           "END CATCH. Inspect with show_error(); run_all() resumes.")
+                return self.log_df()
         return self.log_df()
 
     def run_until(self, target: "int | str | None" = None, line: int | None = None) -> object:
@@ -1432,6 +1569,70 @@ class TSQLDebugger:
         state["@@ROWCOUNT"] = self._env.get("@@ROWCOUNT")
         self._echo(f"{'@@ROWCOUNT':<20} = {_shorten(state['@@ROWCOUNT'], 300)}")
         return state
+
+    def eval(self, expr: str) -> object:
+        """Evaluate a T-SQL expression ONCE with the current variables.
+
+        The one-shot counterpart of watch(): dbg.eval("@preco * @qtd"),
+        dbg.eval("(SELECT COUNT(*) FROM stg.movements)"). The expression runs
+        server-side inside the debug session and the value is returned (and
+        logged as an 'eval' entry).
+
+        A failing expression is reported and returns None — but, as with any
+        server error inside a Fabric transaction, the DATA effects of prior
+        steps are rolled back (captured variables keep their values).
+        """
+        if not expr or not expr.strip():
+            raise ValueError("Empty eval expression.")
+        toks = scan(expr)
+        if sum(1 for t in toks if t.get("u") == "(") != \
+                sum(1 for t in toks if t.get("u") == ")"):
+            raise ValueError("Unbalanced parentheses in eval expression.")
+        line = (self._steps[self._pos]["line"]
+                if self._pos < len(self._steps) else 0)
+        try:
+            self._exec_batch(None, [], f"eval: {expr}", "eval", line,
+                             extra_capture=f"({expr}) AS [__eval__]",
+                             update_rowcount=False)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            self._echo("      eval failed — see the ERROR entry above "
+                       "(show_error() has the full message).")
+            return None
+        value = self._env.pop("__eval__", None)
+        self._echo(f"      = {_shorten(value, 300)}")
+        return value
+
+    def stack(self) -> list:
+        """Print and return the current frame stack, outermost first.
+
+        One frame per debugger in the nested-EXEC chain (parent procedures
+        and the active child), plus the expanded-block context of the cursor
+        (IF/WHILE frames from step_into, loop iteration included). The frame
+        the cursor belongs to is marked with '*'.
+        """
+        root = self
+        while root._parent is not None:
+            root = root._parent
+        frames = []
+        node = root
+        while node is not None:
+            if node._finished or node._pos >= len(node._steps):
+                location, blocks = "finished", []
+            else:
+                s = node._steps[node._pos]
+                location = f"line {s['line']}, step {node._pos + 1}"
+                blocks = list(s.get("frames", []))
+            frames.append({"procedure": node.proc_name, "location": location,
+                           "blocks": blocks, "active": node is self})
+            node = node._child
+        for i, f in enumerate(frames):
+            mark = "*" if f["active"] else " "
+            self._echo(f"{mark}#{i} {f['procedure']} — {f['location']}")
+            for j, b in enumerate(f["blocks"], start=1):
+                self._echo(f"      {'  ' * j}in {b}")
+        return frames
 
     def sql(self, query: str) -> object:
         """Ad-hoc query on the SAME session (sees uncommitted state).

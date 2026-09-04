@@ -79,6 +79,7 @@ dbg.list_steps()      # list the numbered steps, without executing
 dbg.step()            # run the next step ("step over": whole IF/WHILE)
 dbg.step_into()       # step into an IF/WHILE: evaluates the condition
                       #   server-side, picks the branch, yields sub-steps
+dbg.step_out()        # finish the current block/child and stop one level up
 dbg.run_all(into=True)   # run to the end the step_into() way: every IF/WHILE
                          #   expanded, each loop iteration its own logged step
 child = dbg.step_into()   # on an `EXEC dbo.child ...` step: fetches the child's
@@ -90,6 +91,8 @@ dbg.run_until(15)     # run up to step 15 (breakpoint)
 dbg.run_until("MAX(SEQREC)")   # ...or up to the step whose command has that text
 dbg.jump_to(line=40)  # ...or position by file line; find_step() returns the number
 dbg.show_vars()       # state of every variable (OUTPUT params included)
+dbg.eval("@a * @b")   # evaluate one expression with the CURRENT variables
+dbg.stack()           # where am I? procedures + expanded blocks + iteration
 dbg.sql("SELECT COUNT(*) FROM dbo.movements")   # query on the SAME session
 dbg.jump_to(17)       # move the cursor without running earlier steps
 dbg.set_var("@sqlSrc", "...")                   # build state by hand
@@ -100,7 +103,9 @@ dbg.show_error()      # the step that FAILED, in full — the one-call idiom
                       #   after a failed run_all() (last_error() for the dict)
 dbg.last_results()    # result sets the procedure itself produced
 dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg")   # tracked every step
+dbg.log_at(8, "@fat")               # logpoint: print the value there, never stop
 dbg.break_at(42, "@code = 31000")   # run_all() stops there when it's true
+dbg.break_at(8, hits=4)             # ...or on the 4th pass (once=True: fire once)
 dbg.save_state("st.json")           # variables snapshot (JSON) ...
 dbg.load_state("st.json")           # ... resume tomorrow with jump_to()
 dbg.reset()           # rollback + replay from step 1 on a fresh session
