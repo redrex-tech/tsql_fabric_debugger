@@ -37,6 +37,17 @@ silently running post-loop steps on partial state; `eval()` failures no
 longer pollute `ERROR_MESSAGE()`; logpoints are disarmed during CATCH
 emulation.
 
+Robustness against orphaned warehouse sessions (a debugger process killed
+without close() leaves its transaction open, holding locks):
+
+- **`kill_orphan_sessions(server, database, min_idle_seconds=900)`** (and
+  `tsql-debug --kill-orphans [--min-idle N]`): KILL library-tagged sessions
+  sleeping with an open transaction past the idle threshold, so the server
+  rolls them back and releases their locks.
+- The `tsql-debug` and `tsql-fabric-dap` entry points install a SIGTERM
+  handler: a polite kill runs close()+ROLLBACK instead of orphaning the
+  session (SIGKILL still needs the janitor above).
+
 
 ## 0.2.3 — 2026-09-04
 

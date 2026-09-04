@@ -392,6 +392,7 @@ Lifecycle:
 | `fetch_source(proc_name, server, database)` | The deployed source of a procedure, straight from the warehouse (`OBJECT_DEFINITION` on a short-lived session). Raises `ValueError` when the object is missing or `VIEW DEFINITION` is denied. |
 | `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
 | `connect(server, database, autocommit=True)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
+| `kill_orphan_sessions(server, database, min_idle_seconds=900)` | KILL library-tagged sessions left sleeping with an open transaction (a debugger process killed without close()), whose locks block `OBJECT_DEFINITION`/DDL for everyone. Also `tsql-debug --kill-orphans`. CAUTION: an interactively paused debug looks like an orphan — raise the threshold on shared warehouses. |
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
