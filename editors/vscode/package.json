@@ -1,0 +1,202 @@
+{
+  "name": "tsql-fabric-debugger-vscode",
+  "displayName": "T-SQL Fabric Debugger",
+  "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
+  "version": "0.1.0",
+  "publisher": "redrex-tech",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode"
+  },
+  "homepage": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode/issues"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "keywords": [
+    "tsql",
+    "fabric",
+    "warehouse",
+    "sql-server",
+    "debugger"
+  ],
+  "activationEvents": [
+    "onDebugResolve:tsql-fabric",
+    "onDebugDynamicConfigurations:tsql-fabric"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "breakpoints": [
+      {
+        "language": "sql"
+      }
+    ],
+    "configuration": {
+      "title": "T-SQL Fabric Debugger",
+      "properties": {
+        "tsqlFabric.server": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default Fabric Warehouse SQL endpoint (e.g. `xxxx.datawarehouse.fabric.microsoft.com`). Used when a launch configuration omits `server`."
+        },
+        "tsqlFabric.database": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default warehouse name. Used when a launch configuration omits `database`."
+        },
+        "tsqlFabric.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter that has `tsql-fabric-debugger` installed. Empty = use the interpreter selected by the Python extension, else `python3` on PATH."
+        },
+        "tsqlFabric.adapterCommand": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Override the debug adapter command. Empty = run `<python> -m tsql_fabric_debugger.dap`. Set to `tsql-fabric-dap` to use the installed console script directly."
+        }
+      }
+    },
+    "debuggers": [
+      {
+        "type": "tsql-fabric",
+        "label": "T-SQL Fabric",
+        "languages": [
+          "sql"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the .sql file with the CREATE PROCEDURE.",
+                "default": "${file}"
+              },
+              "procName": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Instead of a file: a DEPLOYED procedure name (schema.proc) whose source is fetched from the warehouse.",
+                "default": null
+              },
+              "params": {
+                "type": "object",
+                "description": "Parameter values, e.g. { \"@numAnoRef\": 2015 }.",
+                "default": {}
+              },
+              "server": {
+                "type": "string",
+                "description": "Warehouse SQL endpoint. Falls back to the tsqlFabric.server setting.",
+                "default": ""
+              },
+              "database": {
+                "type": "string",
+                "description": "Warehouse name. Falls back to the tsqlFabric.database setting.",
+                "default": ""
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Break before the first statement.",
+                "default": true
+              },
+              "logLevel": {
+                "type": "string",
+                "enum": [
+                  "simple",
+                  "full"
+                ],
+                "description": "Console log verbosity.",
+                "default": "simple"
+              },
+              "maxLoopIterations": {
+                "type": "number",
+                "description": "Guard: pause a WHILE that exceeds this many iterations.",
+                "default": 1000
+              },
+              "historyBatches": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Keep the batch text for the last N steps only (bounds memory on long loops). null = keep all.",
+                "default": null
+              },
+              "stepTimeout": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Fail a step that runs longer than this many seconds.",
+                "default": null
+              },
+              "lockTimeout": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Fail a lock-blocked step after this many seconds instead of hanging.",
+                "default": null
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "tsql-fabric",
+            "request": "launch",
+            "name": "Debug T-SQL procedure",
+            "program": "${file}",
+            "params": {},
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "T-SQL Fabric: debug the current .sql file",
+            "description": "Step through the CREATE PROCEDURE in the active editor.",
+            "body": {
+              "type": "tsql-fabric",
+              "request": "launch",
+              "name": "Debug T-SQL procedure",
+              "program": "^\"\\${file}\"",
+              "params": {},
+              "stopOnEntry": true
+            }
+          },
+          {
+            "label": "T-SQL Fabric: debug a deployed procedure",
+            "description": "Fetch a deployed procedure's source from the warehouse and step through it.",
+            "body": {
+              "type": "tsql-fabric",
+              "request": "launch",
+              "name": "Debug deployed procedure",
+              "procName": "schema.proc",
+              "params": {},
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build -- --minify",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run build -- --sourcemap --watch",
+    "compile-check": "tsc --noEmit -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}
