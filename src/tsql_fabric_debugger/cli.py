@@ -67,6 +67,8 @@ def main(argv=None):
     ap.add_argument("--log-level", choices=["simple", "full"], default="simple")
     ap.add_argument("--step-timeout", type=int, metavar="SECONDS",
                     help="per-step query timeout")
+    ap.add_argument("--lock-timeout", type=int, metavar="SECONDS",
+                    help="fail a lock-blocked step fast instead of hanging")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args(argv)
 
@@ -83,12 +85,13 @@ def main(argv=None):
         df = run_procedure(sql_text=sql_text, params=dict(args.param),
                            server=args.server, database=args.database,
                            commit=args.commit, save_csv=args.csv,
-                           log_level=args.log_level, step_timeout=args.step_timeout)
+                           log_level=args.log_level, step_timeout=args.step_timeout,
+                           lock_timeout=args.lock_timeout)
     else:
         print("[WARNING] no CREATE PROCEDURE found — running as a loose script "
               "(--param and --log-level do not apply on this path).")
         df = run_script(sql_text=sql_text, server=args.server, database=args.database,
-                        commit=args.commit)
+                        commit=args.commit, lock_timeout=args.lock_timeout)
         if args.csv:
             save_log_csv(df, args.csv)
 

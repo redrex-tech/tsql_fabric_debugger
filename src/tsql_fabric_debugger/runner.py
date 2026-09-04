@@ -90,21 +90,22 @@ def run_procedure(sql_file=None, sql_text=None, params=None, server=None, databa
 
 
 def run_script(sql_file=None, sql_text=None, server=None, database=None,
-               stop_on_error=True, commit=False, echo=print):
+               stop_on_error=True, commit=False, lock_timeout=None, echo=print):
     """Execute a loose script (no CREATE PROCEDURE) batch by batch.
 
     Runs inside a transaction with ROLLBACK at the end by default — pass
     commit=True to persist. Splits on GO when present, otherwise per
     statement via the library's scanner. No variable preservation across
     batches — for that, the script must be a procedure and go through
-    TSQLDebugger.
+    TSQLDebugger. lock_timeout (seconds) fails a lock-blocked batch fast
+    instead of hanging.
     """
     if sql_text is None:
         sql_text = read_sql_file(sql_file)
     batches = split_script(sql_text)
     echo(f"{len(batches)} batch(es) found.")
 
-    conn = connect(server, database, autocommit=False)
+    conn = connect(server, database, autocommit=False, lock_timeout=lock_timeout)
     cursor = conn.cursor()
     log = []
     try:

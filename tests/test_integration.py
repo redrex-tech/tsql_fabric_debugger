@@ -523,3 +523,19 @@ def test_breakpoint_on_the_block_header_line_stops():
     total = dbg._env["@TOTAL"]
     dbg.close()
     assert total == 15
+
+
+def test_lock_timeout_is_applied_to_the_session():
+    # the anti-hang guarantee: a session opened with lock_timeout carries it,
+    # so a lock-blocked statement fails with 1222 instead of waiting forever.
+    # (A real contention test would create the very orphan-lock situation this
+    # feature mitigates, so we assert the session setting rather than deadlock
+    # the warehouse on purpose.)
+    from tsql_fabric_debugger.connection import connect as _connect
+
+    conn = _connect(autocommit=True, lock_timeout=5)
+    cur = conn.cursor()
+    cur.execute("SELECT @@LOCK_TIMEOUT")
+    value = cur.fetchone()[0]
+    conn.close()
+    assert value == 5000            # seconds -> ms, persisted on the session

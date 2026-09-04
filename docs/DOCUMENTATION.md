@@ -247,6 +247,7 @@ TSQLDebugger(
     preview_chars=500,        # command truncation in the log
     max_loop_iterations=1000, # step_into guard for WHILE loops
     step_timeout=None,        # seconds per step (None = unlimited)
+    lock_timeout=None,        # seconds to wait for a lock, then fail (anti-hang)
     max_result_rows=50,       # rows kept per procedure-produced result set
     echo=print,               # console sink — pass any callable
 )

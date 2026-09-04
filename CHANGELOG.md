@@ -32,6 +32,11 @@ Productivity release — the items that turn a step executor into a debugger:
   live in a server-side session temp table and are hydrated into variables
   per batch — uploaded once per change instead of re-sent on every step
   (graceful fallback if the endpoint lacks temp tables).
+- **`lock_timeout`**: a session opened with `lock_timeout=<seconds>` fails a
+  lock-blocked statement fast (error 1222) instead of hanging behind another
+  session's lock — the anti-hang for orphaned-transaction locks (constructor,
+  `run_script`, and `--lock-timeout` on the CLI). It bounds the wait; only
+  the server can reap the orphan itself.
 - **Memory bounds**: `history_batches=N` prunes old SUCCESS payloads
   (batch text/result sets) keeping the last N and every ERROR; `step_into`
   on WHILE now prunes the previous iteration's executed sub-steps, so long

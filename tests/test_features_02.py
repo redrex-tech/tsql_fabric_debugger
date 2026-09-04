@@ -196,3 +196,25 @@ def test_child_never_closes_a_borrowed_session():
     child._owns_connection = False
     child.close()
     assert not fake.closed and child._conn is None
+
+
+def test_lock_timeout_issues_the_set_on_connect(monkeypatch):
+    import tsql_fabric_debugger.connection as conn_mod
+
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, *a): executed.append(sql)
+        def close(self): pass
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(conn_mod, "_get_token", lambda: "tok")
+    import pyodbc
+    monkeypatch.setattr(pyodbc, "connect", lambda *a, **k: FakeConn())
+    conn_mod.connect(server="s", database="d", lock_timeout=7)
+    assert executed == ["SET LOCK_TIMEOUT 7000;"]     # seconds -> ms
+    executed.clear()
+    conn_mod.connect(server="s", database="d")        # default: no SET
+    assert executed == []

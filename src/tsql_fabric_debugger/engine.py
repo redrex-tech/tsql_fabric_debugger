@@ -80,7 +80,7 @@ class TSQLDebugger:
                  preview_chars: int = 500, max_loop_iterations: int = 1000,
                  step_timeout: int | None = None, max_result_rows: int = 50,
                  offload_threshold: int = 200_000, history_batches: int | None = None,
-                 echo=print):
+                 lock_timeout: int | None = None, echo=print):
         if sql_text is None:
             if sql_file is None:
                 raise ValueError("Provide sql_file or sql_text.")
@@ -94,6 +94,7 @@ class TSQLDebugger:
         self._preview_chars = preview_chars
         self._max_loop_iterations = max_loop_iterations
         self._step_timeout = step_timeout            # seconds per step (None = unlimited)
+        self._lock_timeout = lock_timeout            # seconds to wait for a lock (None = forever)
         self._max_result_rows = max_result_rows      # rows captured per procedure result set
         self._offload_threshold = offload_threshold  # chars; bigger strings live server-side
         self._history_batches = history_batches      # keep batch text for the last N entries
@@ -224,7 +225,8 @@ class TSQLDebugger:
             raise RuntimeError("This child debugger was detached from its parent "
                                "session and cannot reconnect on its own.")
         if self._conn is None:
-            self._conn = connect(self._server, self._database, autocommit=self._autocommit)
+            self._conn = connect(self._server, self._database, autocommit=self._autocommit,
+                                 lock_timeout=self._lock_timeout)
             if self._step_timeout:
                 self._conn.timeout = self._step_timeout   # per-command timeout, in seconds
             self._cursor = self._conn.cursor()
@@ -802,6 +804,7 @@ class TSQLDebugger:
                 step_timeout=self._step_timeout, max_result_rows=self._max_result_rows,
                 offload_threshold=self._offload_threshold,
                 history_batches=self._history_batches,
+                lock_timeout=self._lock_timeout,
                 echo=lambda m: self._echo("    » " + str(m)),
             )
         except ValueError as exc:

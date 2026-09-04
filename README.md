@@ -140,6 +140,7 @@ UTF-16 with BOM (SSMS default) or cp1252.
 | `log_level` | `"simple"` | `"full"` prints whole commands, untruncated variables and the SQL batch on errors |
 | `stop_on_error` | `True` | stop the sequential run on an unhandled error |
 | `step_timeout` | `None` | per-step query timeout in seconds (`None` = unlimited) |
+| `lock_timeout` | `None` | seconds to wait for a lock before failing (error 1222) instead of hanging behind another session — the anti-hang for orphaned-transaction locks; does not prevent the orphan, only bounds the wait |
 | `max_result_rows` | `50` | rows captured per result set the procedure produces |
 | `max_loop_iterations` | `1000` | guard for `step_into()` on WHILE loops |
 | `preview_chars` | `500` | command truncation in the log's `command` column |

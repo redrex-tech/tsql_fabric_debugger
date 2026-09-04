@@ -27,8 +27,16 @@ def _get_token():
         return AzureCliCredential().get_token(TOKEN_SCOPE).token
 
 
-def connect(server: str | None = None, database: str | None = None, autocommit: bool = True):
-    """Open an authenticated (Entra ID) connection. One session = one debug."""
+def connect(server: str | None = None, database: str | None = None,
+            autocommit: bool = True, lock_timeout: int | None = None):
+    """Open an authenticated (Entra ID) connection. One session = one debug.
+
+    lock_timeout (seconds): when set, a statement that waits for a lock this
+    long fails with SQL error 1222 instead of blocking forever. It does NOT
+    prevent an orphaned session from holding locks — only the server can reap
+    that — but it turns "hangs indefinitely behind an orphan" into an
+    immediate, actionable error. Applies to the whole session.
+    """
     import pyodbc
 
     server = server or os.environ.get(SERVER_ENV)
@@ -47,10 +55,17 @@ def connect(server: str | None = None, database: str | None = None, autocommit: 
     # APP= makes the debugger identifiable in sys.dm_exec_sessions.program_name
     # during a blocking investigation; LoginTimeout bounds the connect phase
     # (step_timeout only covers command execution).
-    return pyodbc.connect(
+    conn = pyodbc.connect(
         f"DRIVER={{ODBC Driver 18 for SQL Server}};"
         f"SERVER={server};DATABASE={database};Encrypt=yes;"
         f"APP=tsql-fabric-debugger;LoginTimeout=30;",
         attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct},
         autocommit=autocommit,
     )
+    if lock_timeout is not None:
+        # a session option: must run outside pyodbc's parameterized path so it
+        # persists for the session (sp_prepexec would revert it per batch)
+        cur = conn.cursor()
+        cur.execute(f"SET LOCK_TIMEOUT {int(lock_timeout) * 1000};")
+        cur.close()
+    return conn
