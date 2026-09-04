@@ -1197,6 +1197,28 @@ class TSQLDebugger:
             self._echo(detail["batch"])
         return entry
 
+    def last_error(self) -> dict | None:
+        """The most recent ERROR log entry, or None if no step has failed.
+
+        Replaces the manual `next(e for e in dbg._log if e["status"] == "ERROR")`
+        scan. With emulated CATCHes a run can log several ERROR entries — this
+        returns the latest one; filter log_df() by status for the full history.
+        """
+        return next((e for e in reversed(self._log) if e["status"] == "ERROR"), None)
+
+    def show_error(self) -> dict | None:
+        """show_detail() of the most recent ERROR entry: the failing command,
+        the clean and raw error messages, and the executed SQL batch.
+
+        The one-call idiom after a failed run_all(). Prints a note and returns
+        None if no step has failed.
+        """
+        entry = self.last_error()
+        if entry is None:
+            self._echo("No error logged.")
+            return None
+        return self.show_detail(entry["step"])
+
     def last_results(self, step_no: int | None = None) -> list:
         """Result sets the procedure itself produced in one logged entry.
 
@@ -1307,11 +1329,17 @@ class TSQLDebugger:
                    f"the WHILE re-evaluates afterwards.")
         return subs
 
-    def run_all(self) -> object:
+    def run_all(self, into: bool = False) -> object:
         """Run to the end — or until an error (CATCH emulated) or a breakpoint.
 
         Breakpoints (break_at) stop BEFORE the matching step executes; calling
         run_all() again resumes past the one it stopped at.
+
+        into=True walks the whole procedure the way step_into() does: every
+        IF/WHILE is expanded so each branch taken and each loop iteration
+        becomes its own logged step — the friendly way to trace a loop without
+        a manual step_into() cycle. Statements that are not blocks (and loops
+        with BREAK/CONTINUE) run whole, exactly as with into=False.
         """
         while not self._finished and self._pos < len(self._steps):
             if self._child is not None:
@@ -1356,7 +1384,7 @@ class TSQLDebugger:
                                    + ". step()/run_all() to continue.")
                         return self.log_df()
             self._break_resume = None
-            self.step()
+            self.step_into() if into else self.step()
         return self.log_df()
 
     def run_until(self, target: "int | str | None" = None, line: int | None = None) -> object:

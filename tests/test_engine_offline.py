@@ -133,6 +133,40 @@ def test_error_entry_returned_not_the_catch_entry(fake_session):
     dbg.close()
 
 
+def test_last_error_and_show_error_find_the_error_entry(fake_session):
+    # replaces the end-user idiom `next(e for e in dbg._log if e["status"] == "ERROR")`
+    dbg = _dbg(fake_session)
+    fake_session.turn(updates={"@OUT": 0})
+    fake_session.fail("boom")
+    dbg.step()
+    dbg.step()
+    entry = dbg.last_error()
+    assert entry is not None and "boom" in entry["error"]
+    assert dbg.show_error() is entry              # show_detail() of that entry
+    dbg.close()
+
+
+def test_last_error_returns_the_latest_of_several(fake_session):
+    # a CATCH-handled error plus a later fatal one: last_error() is the latest
+    dbg = TSQLDebugger(sql_text=TRY, params={}, server="s", database="d", echo=lambda *_: None)
+    fake_session.turn(updates={"@R": 1})                 # SET @r = 1
+    fake_session.fail("first")                           # SET @r = 2 fails -> CATCH
+    fake_session.fail("second")                          # CATCH body fails too
+    dbg.run_all()
+    entry = dbg.last_error()
+    assert entry is not None and "second" in entry["error"]
+    dbg.close()
+
+
+def test_show_error_without_error_returns_none(fake_session):
+    dbg = _dbg(fake_session)
+    fake_session.turn(updates={"@OUT": 0})
+    dbg.step()
+    assert dbg.last_error() is None
+    assert dbg.show_error() is None
+    dbg.close()
+
+
 def test_fatal_connection_error_is_not_swallowed(monkeypatch):
     import tsql_fabric_debugger.engine as eng
 
@@ -265,6 +299,31 @@ def test_step_into_if_picks_else(fake_session):
     fake_session.turn(updates={"@X": 2})
     dbg.step()
     assert dbg._env["@X"] == 2
+    dbg.close()
+
+
+def test_run_all_into_expands_blocks(fake_session):
+    # into=True walks the procedure the step_into() way: the IF becomes a
+    # logged "cond" step and the chosen branch runs — no manual step_into loop.
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(cond=1)                     # IF @n > 0 -> true
+    fake_session.turn(updates={"@X": 1})          # SET @x = 1 (the taken branch)
+    dbg.run_all(into=True)
+    kinds = [r["kind"] for r in dbg._log]
+    assert "cond" in kinds                        # the block was expanded
+    assert dbg._env["@X"] == 1
+    dbg.close()
+
+
+def test_run_all_without_into_runs_block_whole(fake_session):
+    # the default runs the IF as one atomic step — no "cond" step is logged.
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 5}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(updates={"@X": 1})          # the whole block, one execute
+    dbg.run_all()
+    kinds = [r["kind"] for r in dbg._log]
+    assert "cond" not in kinds
     dbg.close()
 
 

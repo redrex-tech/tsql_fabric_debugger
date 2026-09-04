@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.2 — 2026-09-04
+
+Usability (driven by end-user feedback):
+
+- **`run_all(into=True)`**: run the whole procedure the `step_into()` way —
+  every `IF`/`WHILE` is expanded, so each branch taken and each loop
+  iteration becomes its own logged step. Replaces the low-level
+  `while not dbg._finished and dbg._pos < len(dbg._steps): dbg.step_into()`
+  loop with a single call. Statements that are not blocks (and loops with
+  `BREAK`/`CONTINUE`) run whole, exactly as `run_all()` already does. Fully
+  backward compatible — the default is `into=False`.
+- **`show_error()` / `last_error()`**: inspect a failure without scanning the
+  log by hand. `last_error()` returns the most recent ERROR log entry (or
+  `None`); `show_error()` runs `show_detail()` on it — replacing the
+  `erro = next(e for e in dbg._log if e["status"] == "ERROR");
+  dbg.show_detail(erro["step"])` idiom with a single call.
+
 ## 0.2.1 — 2026-09-04
 
 Usability (driven by end-user feedback that the API was too low-level):

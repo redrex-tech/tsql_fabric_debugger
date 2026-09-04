@@ -23,5 +23,5 @@ from .connection import connect
 from .engine import TSQLDebugger
 from .runner import diff_logs, run_procedure, run_script, summarize
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __all__ = ["TSQLDebugger", "connect", "diff_logs", "run_procedure", "run_script", "summarize", "__version__"]
