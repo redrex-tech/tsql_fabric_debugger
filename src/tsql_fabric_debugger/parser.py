@@ -223,6 +223,7 @@ def skip_stmt(tokens, i, i1):
     parens = block = 0
     start = i
     head = None
+    prev_word = None
     used_continuations = set()
     while i < i1:
         t = tokens[i]
@@ -236,7 +237,10 @@ def skip_stmt(tokens, i, i1):
                 return i + 1
             if w == "ELSE":
                 return i
-            if w in STMT_START and i > start and head != "MERGE":
+            if (w in STMT_START and i > start and head != "MERGE"
+                    # a SELECT glued by a set operator belongs to THIS statement
+                    and not (w == "SELECT"
+                             and prev_word in ("UNION", "EXCEPT", "INTERSECT", "ALL"))):
                 allowed = _CONTINUATIONS.get(head, ())
                 if w in allowed and w not in used_continuations:
                     used_continuations.add(w)
@@ -253,6 +257,7 @@ def skip_stmt(tokens, i, i1):
                 block -= 1
             if head is None:
                 head = w
+            prev_word = w
         i += 1
     return i1
 
@@ -610,3 +615,77 @@ def read_sql_file(path) -> str:
         return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         return raw.decode("cp1252")
+
+
+def parse_exec_call(text):
+    """Parse an `EXEC[UTE] [@ret =] schema.proc [args]` statement.
+
+    Returns {"proc", "assign_var", "args"} where each arg is
+    {"name": "@param" | None, "value": raw text, "output": bool} — or None
+    when the statement is not a plain child-procedure call this parser can
+    step into (dynamic EXEC(@sql), sp_executesql, INSERT ... EXEC, etc.).
+    T-SQL only allows literals or variables as EXEC arguments, which keeps
+    the value grammar small.
+    """
+    tokens = scan(text)
+    if not tokens or tokens[0]["u"] not in ("EXEC", "EXECUTE"):
+        return None
+    i = 1
+    assign_var = None
+    if (i + 1 < len(tokens) and tokens[i]["k"] == "w" and tokens[i]["u"].startswith("@")
+            and is_punct(tokens[i + 1], "=")):
+        assign_var = text[tokens[i]["s"]:tokens[i]["e"]]
+        i += 2
+    if i >= len(tokens) or is_punct(tokens[i], "("):
+        return None                          # EXEC(@sql) — dynamic
+    # procedure name: words / [brackets] joined by dots
+    name_parts = []
+    while i < len(tokens):
+        t = tokens[i]
+        if t["k"] in ("w", "brk") and not (t["k"] == "w" and t["u"].startswith("@")):
+            name_parts.append(text[t["s"]:t["e"]])
+            i += 1
+            if i < len(tokens) and is_punct(tokens[i], "."):
+                i += 1
+                continue
+            break
+        break
+    if not name_parts:
+        return None
+    proc = ".".join(name_parts)
+    if name_parts[-1].strip("[]").lower().startswith("sp_executesql"):
+        return None                          # dynamic SQL, not a child procedure
+    # arguments: comma-separated at level 0
+    args = []
+    while i < len(tokens):
+        t = tokens[i]
+        if is_punct(t, ";"):
+            break
+        arg = {"name": None, "value": None, "output": False}
+        if (t["k"] == "w" and t["u"].startswith("@") and i + 1 < len(tokens)
+                and is_punct(tokens[i + 1], "=")):
+            arg["name"] = text[t["s"]:t["e"]]
+            i += 2
+        v_start = v_end = None
+        parens = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if is_punct(t, "("):
+                parens += 1
+            elif is_punct(t, ")"):
+                parens -= 1
+            if parens == 0 and (is_punct(t, ",") or is_punct(t, ";")):
+                break
+            if t["k"] == "w" and t["u"] in ("OUTPUT", "OUT") and parens == 0:
+                arg["output"] = True
+                i += 1
+                continue
+            if v_start is None:
+                v_start = t["s"]
+            v_end = t["e"]
+            i += 1
+        arg["value"] = text[v_start:v_end] if v_start is not None else None
+        args.append(arg)
+        if i < len(tokens) and is_punct(tokens[i], ","):
+            i += 1
+    return {"proc": proc, "assign_var": assign_var, "args": args}

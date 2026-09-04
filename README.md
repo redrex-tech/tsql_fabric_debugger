@@ -71,6 +71,11 @@ dbg.list_steps()      # list the numbered steps, without executing
 dbg.step()            # run the next step ("step over": whole IF/WHILE)
 dbg.step_into()       # step into an IF/WHILE: evaluates the condition
                       #   server-side, picks the branch, yields sub-steps
+child = dbg.step_into()   # on an `EXEC dbo.child ...` step: fetches the child's
+                          #   source from the warehouse and returns a CHILD
+                          #   debugger sharing this session; debug it, then the
+                          #   parent's next step() collects the OUTPUT values
+                          #   (an unhandled child error reaches the parent CATCH)
 dbg.run_until(15)     # run up to step 15 (breakpoint)
 dbg.show_vars()       # state of every variable (OUTPUT params included)
 dbg.sql("SELECT COUNT(*) FROM dbo.movements")   # query on the SAME session

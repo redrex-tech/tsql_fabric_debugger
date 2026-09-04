@@ -99,7 +99,7 @@ def test_offload_partitioning_in_batch():
     dbg = _dbg(offload_threshold=100)
     dbg._env["@BIG"] = "y" * 500          # above threshold -> hydrated, not bound
     batch, values = dbg._build_batch("SET @out = 1", [])
-    assert "#tsqldbg_state" in batch and "N'@BIG'" in batch
+    assert "#tsqldbg_state" in batch and f"N'{dbg._state_ns}:@BIG'" in batch
     assert all(v != dbg._env["@BIG"] for v in values)
     # below threshold stays a plain parameter
     dbg._env["@BIG"] = "y" * 50
@@ -137,3 +137,62 @@ def test_diff_logs_alignment_and_divergence():
     assert changes == {"diverged", "only_in_a", "only_in_b"}
     diverged = next(r for r in rows if r["change"] == "diverged")
     assert diverged["rows_a"] == 10 and diverged["rows_b"] == 99
+
+
+# ---------------------------------------------------------------------------
+# nested EXEC step-into (offline paths)
+# ---------------------------------------------------------------------------
+from tsql_fabric_debugger.parser import parse_exec_call
+
+
+@pytest.mark.parametrize("text, expected_proc", [
+    ("EXEC dbo.child @a = 1, @b = @x OUTPUT", "dbo.child"),
+    ("EXECUTE [sch].[proc] 5, N'oi', @v OUT", "[sch].[proc]"),
+    ("EXEC @r = dbo.f", "dbo.f"),
+])
+def test_parse_exec_call_supported(text, expected_proc):
+    call = parse_exec_call(text)
+    assert call is not None and call["proc"] == expected_proc
+
+
+@pytest.mark.parametrize("text", [
+    "EXEC (@sql)",
+    "EXEC sp_executesql @sql",
+    "SELECT 1",
+    "INSERT INTO t EXEC dbo.p",
+])
+def test_parse_exec_call_unsupported(text):
+    assert parse_exec_call(text) is None
+
+
+def test_map_exec_args_positional_named_and_output():
+    dbg = _dbg()
+    dbg._env["@OUT"] = 7
+    child_src = ("CREATE PROCEDURE dbo.c @p1 INT, @p2 NVARCHAR(10) = N'd', "
+                 "@p3 INT OUTPUT AS BEGIN SET @p3 = @p1; END")
+    call = parse_exec_call("EXEC dbo.c 5, @p3 = @out OUTPUT")
+    params, outputs = dbg._map_exec_args(call, child_src)
+    assert params == {"@p1": 5, "@p3": 7}
+    assert outputs == [("@P3", "@OUT")]
+
+    with pytest.raises(ValueError, match="does not exist"):
+        dbg._map_exec_args(parse_exec_call("EXEC dbo.c @nope = 1"), child_src)
+    with pytest.raises(ValueError, match="OUTPUT argument"):
+        dbg._map_exec_args(parse_exec_call("EXEC dbo.c 1, N'x', 9 OUTPUT"), child_src)
+    with pytest.raises(ValueError, match="not a literal"):
+        dbg._map_exec_args(parse_exec_call("EXEC dbo.c GETDATE()"), child_src)
+
+
+def test_child_never_closes_a_borrowed_session():
+    class FakeConn:
+        closed = False
+        def rollback(self): pass
+        def close(self): self.closed = True
+
+    child = _dbg()
+    fake = FakeConn()
+    child._conn = fake
+    child._cursor = object()
+    child._owns_connection = False
+    child.close()
+    assert not fake.closed and child._conn is None

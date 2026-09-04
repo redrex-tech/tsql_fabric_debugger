@@ -4,6 +4,13 @@
 
 Productivity release — the items that turn a step executor into a debugger:
 
+- **Nested EXEC step-into**: `step_into()` on `EXEC schema.proc ...` fetches
+  the child's source from the warehouse and returns a child debugger that
+  shares the parent's session/transaction; OUTPUT arguments and @@ROWCOUNT
+  copy back on completion, and an unhandled child error propagates to the
+  parent's CATCH exactly like the real EXEC. `abort_child()` discards.
+  Dynamic SQL/sp_executesql/expression arguments fall back to step-over.
+
 - **Breakpoints**: `break_at(line, condition=None)` stops `run_all()` BEFORE
   the matching step; file lines are stable across expansions, conditions run
   server-side with the current variables, and `run_all()` auto-expands
@@ -29,6 +36,19 @@ Productivity release — the items that turn a step executor into a debugger:
   (batch text/result sets) keeping the last N and every ERROR; `step_into`
   on WHILE now prunes the previous iteration's executed sub-steps, so long
   loops no longer grow the step list per iteration.
+
+Post-implementation adversarial review (second pass) fixed: UNION/EXCEPT/
+INTERSECT no longer split a statement (with or without ';'); a child ending
+in error propagates to the parent CATCH instead of reporting SUCCESS;
+breakpoints on a block's own header line stop before the block (and blocks
+containing breakpoints auto-expand only for BODY lines); WHILE loops with
+BREAK/CONTINUE containing a breakpoint stop before the loop instead of
+silently running through; detached children cannot silently reconnect as
+independent sessions; child guards on step_into/run_step/run_until; table
+variables are rejected as EXEC arguments; the server-side offload table is
+namespaced per debugger instance (parent/child same-named variables never
+collide) and its creation state travels between parent and child; nested
+loop pruning handles inner loops; reset()/close() detach an active child.
 
 ## 0.1.0 — 2026-09-03
 

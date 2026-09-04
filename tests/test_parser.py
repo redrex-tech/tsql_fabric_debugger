@@ -210,3 +210,26 @@ def test_semicolonless_statements_split_correctly():
     tokens = scan(sql)
     j1 = skip_stmt(tokens, 0, len(tokens))
     assert sql[tokens[0]["s"]:tokens[j1 - 1]["e"]].endswith("VALUES (s.a);")
+
+
+def test_union_except_intersect_never_split_a_statement():
+    from tsql_fabric_debugger.parser import skip_stmt
+    for op in ("UNION", "UNION ALL", "EXCEPT", "INTERSECT"):
+        # with terminator
+        sql = f"INSERT INTO t SELECT a FROM x {op} SELECT b FROM y; SET @z = 1;"
+        tokens = scan(sql)
+        j = skip_stmt(tokens, 0, len(tokens))
+        assert sql[tokens[0]["s"]:tokens[j - 1]["e"]].endswith("SELECT b FROM y;"), op
+        # without terminator (;-less mode)
+        sql = f"SELECT a FROM x {op} SELECT b FROM y SET @z = 1"
+        tokens = scan(sql)
+        j = skip_stmt(tokens, 0, len(tokens))
+        assert sql[tokens[0]["s"]:tokens[j - 1]["e"]].endswith("SELECT b FROM y"), op
+
+
+def test_union_inside_if_branch_stays_in_the_branch():
+    sql = "IF @x = 1 SELECT 1 AS a UNION SELECT 2 AS a"
+    tokens = scan(sql)
+    end, branches, _ = parse_conditional(tokens, 0, len(tokens))
+    body = sql[tokens[branches[0]["body"][0]]["s"]:tokens[branches[0]["body"][1] - 1]["e"]]
+    assert body == "SELECT 1 AS a UNION SELECT 2 AS a"

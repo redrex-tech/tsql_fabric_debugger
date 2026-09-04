@@ -186,7 +186,36 @@ statement-level granularity:
 - A nested `BEGIN TRY` inside an expanded branch registers its own CATCH —
   exactly once, even across WHILE iterations (span-keyed registration).
 
-### 2.7 Transaction model
+### 2.7 Stepping into a nested EXEC
+
+`step_into()` on a plain `EXEC [@ret =] schema.proc [args]` statement builds a
+**child debugger**:
+
+1. The child's source is fetched from the warehouse on the same session
+   (`OBJECT_DEFINITION` — it even sees procedures created uncommitted in this
+   transaction; you need VIEW DEFINITION permission).
+2. Call arguments are matched to the child's parameters (positional and
+   named; literals and parent variables — T-SQL allows nothing else in EXEC
+   arguments), and defaults fill the gaps.
+3. The child `TSQLDebugger` ADOPTS the parent's session and transaction — it
+   never opens or closes a connection of its own — and is returned to you.
+   Debug it exactly like the parent (`child.step()`, `child.step_into()` for
+   grandchildren, `child.run_all()`).
+4. When the child finishes, the parent's next `step()` collects it: OUTPUT
+   arguments copy back into the parent's variables, `@@ROWCOUNT` carries
+   over, and the EXEC step is logged (`kind="exec"`). A child that ended in
+   an **unhandled error** (no CATCH, a `THROW`, or a failing CATCH)
+   propagates instead: the EXEC records as ERROR and the parent's own CATCH
+   is emulated — the same thing the real EXEC would do.
+
+While a child is active the parent refuses to move (`step`/`step_into`/
+`run_step`/`run_all`/`run_until` all point you back to the child);
+`abort_child()` discards it. Dynamic calls (`EXEC(@sql)`, `sp_executesql`),
+unavailable sources and expression arguments fall back to a plain step-over
+with a notice. Remember the shared transaction: a child error rolls back the
+parent's data effects too (announced, and marked via `post_rollback`).
+
+### 2.8 Transaction model
 
 The session opens with `autocommit=False`: one transaction from the first
 step until `close()`. `close()` (and the context-manager exit) rolls back by
@@ -313,6 +342,13 @@ Watches and breakpoints:
 | `unwatch(name=None)` | Remove one watch, or all of them. |
 | `break_at(line, condition=None)` | Stop `run_all()` BEFORE any step at this **file** line (stable across expansions, unlike step numbers). The optional condition is T-SQL, evaluated server-side with the current variables. `run_all()` auto-expands IF/WHILE blocks that contain a breakpoint line, so loop-body breakpoints just work. Resuming `run_all()` continues past the stop. |
 | `clear_breaks(line=None)` / `breaks()` | Remove/inspect breakpoints. |
+
+Nested EXEC:
+
+| Method | Behavior |
+|---|---|
+| `step_into()` on an EXEC step | Returns a **child debugger** sharing the session (see §2.7): debug the called procedure statement by statement. Falls back to step-over for dynamic SQL, missing sources or expression arguments. |
+| `abort_child()` | Discard an active child without collecting OUTPUTs; the EXEC step stays pending (step() runs it whole, step_into() re-enters). |
 
 Inspection:
 

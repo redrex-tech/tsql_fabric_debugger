@@ -28,6 +28,7 @@ from .parser import (
     eval_literal,
     extract_declares,
     find_procedure,
+    parse_exec_call,
     parse_params,
     procedure_body,
     read_sql_file,
@@ -106,6 +107,12 @@ class TSQLDebugger:
         self._state_table_ok = False
         self._offload_disabled = False
         self._pruned_upto = 0
+        self._owns_connection = True   # False for a child adopted into a parent session
+        self._child = None             # active child debugger (nested EXEC step-into)
+        self._child_call = None        # (exec_step, output_map, assign_var)
+        # namespace for the server-side state table: a nested-EXEC child shares
+        # the session (and the table) — same-named variables must not collide
+        self._state_ns = f"{id(self) & 0xFFFFFF:06x}"
         self._conn = None
         self._cursor = None
         self._log = []
@@ -113,6 +120,7 @@ class TSQLDebugger:
         self._error_msg = None
         self._error_number = None
         self._error_line = None
+        self._propagated_error = None   # (msg, number, line) when the proc ends in error
         self._finished = False
         self._rolled_back = False
         self._warned_post_rollback = False
@@ -212,6 +220,9 @@ class TSQLDebugger:
                            "that fills AND consumes it, or switch to #temp while investigating.")
 
     def _ensure_connection(self):
+        if self._conn is None and not self._owns_connection:
+            raise RuntimeError("This child debugger was detached from its parent "
+                               "session and cannot reconnect on its own.")
         if self._conn is None:
             self._conn = connect(self._server, self._database, autocommit=self._autocommit)
             if self._step_timeout:
@@ -271,7 +282,7 @@ class TSQLDebugger:
             values = [self._env[k] for k in to_inject]
         for k in offloaded:
             parts.append(f"SELECT {self._vars[k]['name']} = (SELECT [value] FROM "
-                         f"#tsqldbg_state WHERE [name] = N'{k}');")
+                         f"#tsqldbg_state WHERE [name] = N'{self._state_ns}:{k}');")
         if stmt_text is not None:
             parts.append(stmt_text + "\n;")
         capture = f"SELECT '{_SENTINEL}' AS [{_SENTINEL}], @@ROWCOUNT AS [__rowcount__]"
@@ -306,9 +317,10 @@ class TSQLDebugger:
                 self._state_table_ok = True
                 self._offload_synced.clear()
             for k in stale:
+                nskey = f"{self._state_ns}:{k}"
                 cur.setinputsizes([(pyodbc.SQL_WVARCHAR, 0, 0)])
-                cur.execute(f"DELETE FROM #tsqldbg_state WHERE [name] = N'{k}'; "
-                            f"INSERT INTO #tsqldbg_state ([name], [value]) VALUES (N'{k}', ?);",
+                cur.execute(f"DELETE FROM #tsqldbg_state WHERE [name] = N'{nskey}'; "
+                            f"INSERT INTO #tsqldbg_state ([name], [value]) VALUES (N'{nskey}', ?);",
                             (self._env[k],))
                 cur.setinputsizes(None)
                 while cur.nextset():
@@ -579,14 +591,21 @@ class TSQLDebugger:
         if catch_steps:
             self._echo(f"[CATCH] error inside TRY #{catch_id + 1} — emulating "
                        f"{len(catch_steps)} step(s) of its CATCH block.")
-            outcome = self._emulate_catch(catch_steps)   # "ok" | "ended" | "failed"
+            outcome = self._emulate_catch(catch_steps)   # "ok"|"return"|"throw"|"failed"
+            escaped = (self._error_msg, self._error_number, self._error_line)
             self._error_msg = self._error_number = self._error_line = None
             if not finalize:
                 # run_step(): the isolated execution must not end the
                 # sequential debug, whatever happened inside the CATCH
                 return
-            if outcome == "ended":  # RETURN or THROW inside the CATCH
+            if outcome == "return":  # the CATCH handled the error and returned
                 self._finished = True
+                return
+            if outcome in ("throw", "failed"):
+                # THROW re-raises / the CATCH itself failed: the error escapes
+                # this procedure — a parent (nested EXEC) must see it
+                self._finished = True
+                self._propagated_error = escaped
                 return
             if outcome == "ok":
                 # T-SQL semantics: after the CATCH handles the error, execution
@@ -605,18 +624,22 @@ class TSQLDebugger:
                     self._echo("[TRANSACTION] note: data effects before the error were rolled "
                                "back — following steps run against the post-rollback state "
                                "and may diverge from a real execution.")
-            else:
-                self._finished = True
         elif finalize:
+            # no CATCH: the error is unhandled — it would abort the procedure
+            # and propagate to a caller (nested-EXEC parent)
             self._finished = self._stop_on_error
+            if self._finished:
+                self._propagated_error = (self._error_msg, self._error_number,
+                                          self._error_line)
 
     def _emulate_catch(self, catch_steps):
         """Run the CATCH steps without touching the debug lifecycle.
 
-        Returns "ok" (CATCH completed), "ended" (RETURN/THROW inside the
-        CATCH — the procedure would end here) or "failed" (the CATCH itself
-        raised). The CALLER decides what that means for _finished, so an
-        isolated run_step() never kills the sequential session.
+        Returns "ok" (CATCH completed — execution continues after END CATCH),
+        "return" (RETURN inside the CATCH — clean end), "throw" (THROW
+        re-raises the error) or "failed" (the CATCH itself raised). The
+        CALLER decides what that means for _finished and error propagation,
+        so an isolated run_step() never kills the sequential session.
         """
         for step in catch_steps:
             first = scan(step["text"])
@@ -625,7 +648,7 @@ class TSQLDebugger:
                 self._record("throw", step["line"], "SUCCESS",
                              "[CATCH] " + step["text"], started, {}, None)
                 self._echo("      THROW — the original error is re-raised; procedure aborts.")
-                return "ended"
+                return "throw"
             try:
                 _, returned = self._execute_step(step, prefix="[CATCH] ")
             except KeyboardInterrupt:
@@ -634,7 +657,7 @@ class TSQLDebugger:
                 return "failed"
             if returned:
                 self._echo("      RETURN inside the CATCH — procedure execution finished.")
-                return "ended"
+                return "return"
         return "ok"
 
     # -- interactive API ----------------------------------------------------
@@ -655,8 +678,23 @@ class TSQLDebugger:
             self._echo(f" ... + {total_catch} step(s) in {len(self._catches)} CATCH block(s) "
                        "(emulated after an error in the matching TRY)")
 
+    def _child_done(self) -> bool:
+        c = self._child
+        return c is not None and (c._finished or c._pos >= len(c._steps))
+
     def step(self) -> dict | None:
-        """Run the next step and advance the cursor ("step over": whole IF/WHILE)."""
+        """Run the next step and advance the cursor ("step over": whole IF/WHILE).
+
+        When a child debugger (nested EXEC step-into) is active, step() first
+        requires it to finish; the completing call copies the child's OUTPUT
+        values back and records the EXEC step.
+        """
+        if self._child is not None:
+            if not self._child_done():
+                self._echo("[CHILD] a child debugger is active — finish it first "
+                           "(child.run_all()) or discard it with abort_child().")
+                return None
+            return self._finish_child()
         if self._finished or self._pos >= len(self._steps):
             self._echo("Debug finished — all steps executed (or CATCH emulated).")
             return None
@@ -683,7 +721,13 @@ class TSQLDebugger:
         if self._finished or self._pos >= len(self._steps):
             self._echo("Debug finished — all steps executed (or CATCH emulated).")
             return None
+        if self._child is not None:
+            self._echo("[CHILD] a child debugger is active — finish it first "
+                       "(child.run_all()) or abort_child().")
+            return None
         step = self._steps[self._pos]
+        if step["kind"] == "stmt" and step["text"].lstrip()[:4].upper() in ("EXEC", "EXECU"):
+            return self._step_into_exec(step)
         if step["kind"] not in ("if_block", "while_block"):
             return self.step()
         body_text = step["text"].upper()
@@ -711,6 +755,189 @@ class TSQLDebugger:
             self._handle_step_error(step, emulate_catch=True, finalize=True)
             return error_entry
 
+    # -- nested EXEC step-into ----------------------------------------------
+    def _step_into_exec(self, step):
+        """Step INTO a child stored procedure called by a plain EXEC.
+
+        Fetches the child's source from the warehouse (same session — it sees
+        even uncommitted definitions), maps the call arguments onto the
+        child's parameters, and hands back a CHILD TSQLDebugger that shares
+        this session and transaction. Debug it (child.step()/run_all()); when
+        it finishes, the parent's next step() copies the OUTPUT values back
+        and records the EXEC step. Falls back to step over when the call is
+        dynamic (EXEC(@sql)/sp_executesql), the source is unavailable, or an
+        argument is not a literal/variable.
+        """
+        call = parse_exec_call(step["text"])
+        if call is None:
+            self._echo("[CHILD] dynamic EXEC / sp_executesql — cannot step into; stepping over.")
+            return self.step()
+        cur = self._ensure_connection()
+        try:
+            cur.execute("SELECT OBJECT_DEFINITION(OBJECT_ID(?));", (call["proc"],))
+            row = cur.fetchone()
+            source = row[0] if row else None
+            while cur.nextset():
+                pass
+        except Exception as exc:
+            self._echo(f"[CHILD] could not fetch {call['proc']} source "
+                       f"({_parse_sql_error(str(exc))[0]}); stepping over.")
+            return self.step()
+        if not source:
+            self._echo(f"[CHILD] source of {call['proc']} not available "
+                       "(missing object or no VIEW DEFINITION permission); stepping over.")
+            return self.step()
+        try:
+            child_params, output_map = self._map_exec_args(call, source)
+        except ValueError as exc:
+            self._echo(f"[CHILD] {exc}; stepping over.")
+            return self.step()
+        try:
+            child = TSQLDebugger(
+                sql_text=source, params=child_params,
+                server=self._server, database=self._database,
+                autocommit=self._autocommit, log_level=self._log_level,
+                stop_on_error=self._stop_on_error, preview_chars=self._preview_chars,
+                max_loop_iterations=self._max_loop_iterations,
+                step_timeout=self._step_timeout, max_result_rows=self._max_result_rows,
+                offload_threshold=self._offload_threshold,
+                history_batches=self._history_batches,
+                echo=lambda m: self._echo("    » " + str(m)),
+            )
+        except ValueError as exc:
+            self._echo(f"[CHILD] cannot parse {call['proc']} ({exc}); stepping over.")
+            return self.step()
+        child._adopt_connection(self._conn, self._cursor, self._state_table_ok)
+        self._child = child
+        self._child_call = (step, output_map, call["assign_var"])
+        self._echo(f"[CHILD] stepping into {call['proc']} — it SHARES this session and "
+                   "transaction (a child error rolls back everything). Debug it with "
+                   "child.step()/run_all(); the parent's next step() collects the OUTPUTs.")
+        return child
+
+    def _map_exec_args(self, call, source):
+        """Match EXEC arguments to the child's parameters.
+
+        Returns (child_params, output_map) where output_map pairs the child
+        parameter key with the parent variable key for each OUTPUT argument.
+        """
+        tokens = scan(source)
+        i_proc = find_procedure(tokens)
+        if i_proc is None:
+            raise ValueError("child source has no CREATE PROCEDURE")
+        _, child_defs, _ = parse_params(source, tokens, i_proc)
+        by_name = {p["name"].upper(): p for p in child_defs}
+        child_params = {}
+        output_map = []
+        for pos, arg in enumerate(call["args"]):
+            if arg["name"] is not None:
+                target = by_name.get(arg["name"].upper())
+                if target is None:
+                    raise ValueError(f"argument {arg['name']} does not exist on the child")
+            elif pos < len(child_defs):
+                target = child_defs[pos]
+            else:
+                raise ValueError("more positional arguments than child parameters")
+            value_text = (arg["value"] or "").strip()
+            if value_text.startswith("@"):
+                parent_key = value_text.upper()
+                if parent_key not in self._env:
+                    raise ValueError(f"argument variable {value_text} is unknown to the parent")
+                if parent_key in self._vars and self._vars[parent_key]["table"]:
+                    raise ValueError(f"{value_text} is a table variable — its content is "
+                                     "not tracked and would reach the child empty")
+                child_params[target["name"]] = self._env[parent_key]
+                if arg["output"]:
+                    output_map.append((target["name"].upper(), parent_key))
+            else:
+                ok, value = eval_literal(value_text or None)
+                if not ok and value_text != "":
+                    raise ValueError(f"argument {value_text!r} is not a literal or variable")
+                child_params[target["name"]] = value
+                if arg["output"]:
+                    raise ValueError("OUTPUT argument must be a variable")
+        return child_params, output_map
+
+    def _adopt_connection(self, conn, cursor, state_table_ok=False):
+        """Attach this debugger to an existing session (nested EXEC child)."""
+        self._conn = conn
+        self._cursor = cursor
+        self._owns_connection = False
+        self._state_table_ok = state_table_ok
+        if self._pending_defaults:
+            pending, self._pending_defaults = self._pending_defaults, []
+            assigns = ", ".join(f"{n} = ({d})" for n, d in pending)
+            self._exec_batch(f"SELECT {assigns}", [], f"defaults: {assigns}", "params", 0)
+
+    def _finish_child(self):
+        """Collect the finished child and record the EXEC step.
+
+        A child that completed normally hands its OUTPUT values back. A child
+        that ended in an UNHANDLED error (no CATCH, THROW, or a failed CATCH)
+        propagates that error to the parent — exactly like the real EXEC
+        would — so the parent's own CATCH gets emulated.
+        """
+        child = self._child
+        exec_step, output_map, assign_var = self._child_call
+        self._child = None
+        self._child_call = None
+        # session-level bookkeeping travels both ways
+        if child._rolled_back:
+            self._rolled_back = True
+            self._state_table_ok = False
+            self._offload_synced.clear()
+        elif child._state_table_ok:
+            self._state_table_ok = True     # the child may have created the table
+        child._conn = None      # detach WITHOUT closing the shared session
+        child._cursor = None
+        started = time.time()
+        propagated = child._propagated_error
+        if propagated is not None and propagated[0] is not None:
+            # real T-SQL: the child's unhandled error reaches the parent at
+            # the EXEC — OUTPUT values are NOT copied back
+            self._error_msg, self._error_number, _ = propagated
+            self._error_line = exec_step["line"]
+            entry = self._record("exec", exec_step["line"], "ERROR",
+                                 "[CHILD failed] " + exec_step["text"], started,
+                                 {}, self._error_msg)
+            if self._pos < len(self._steps) and self._steps[self._pos] is exec_step:
+                self._pos += 1
+            self._handle_step_error(exec_step, emulate_catch=True, finalize=True)
+            return entry
+        changed = {}
+        for child_key, parent_key in output_map:
+            self._env[parent_key] = child._env.get(child_key)
+            changed[self._vars[parent_key]["name"]] = self._env[parent_key]
+        if "@@ROWCOUNT" in child._env:
+            self._env["@@ROWCOUNT"] = child._env["@@ROWCOUNT"]
+        if assign_var:
+            key = assign_var.upper()
+            if key in self._env:
+                self._env[key] = 0
+                self._echo(f"[CHILD] return value of the child is not observable — "
+                           f"{assign_var} defaulted to 0 (T-SQL success).")
+        entry = self._record("exec", exec_step["line"], "SUCCESS",
+                             "[CHILD done] " + exec_step["text"], started, changed, None)
+        if self._pos < len(self._steps) and self._steps[self._pos] is exec_step:
+            self._pos += 1
+        return entry
+
+    def abort_child(self) -> None:
+        """Discard an active child debugger without collecting its OUTPUTs.
+
+        The shared transaction keeps whatever the child already executed —
+        rollback() if you want that undone too. The EXEC step stays pending.
+        """
+        if self._child is None:
+            self._echo("No active child debugger.")
+            return
+        self._child._conn = None
+        self._child._cursor = None
+        self._child = None
+        self._child_call = None
+        self._echo("Child discarded — the EXEC step is still pending "
+                   "(step() runs it whole, step_into() re-enters).")
+
     def run_step(self, n: int, emulate_catch: bool = False) -> dict | None:
         """Run ONLY step n (1-based), with the current variable state.
 
@@ -719,6 +946,10 @@ class TSQLDebugger:
         depends on variables from earlier steps that never ran, build the
         state first with set_var().
         """
+        if self._child is not None:
+            self._echo("[CHILD] a child debugger is active — finish it first "
+                       "(child.run_all()) or abort_child().")
+            return None
         if not 1 <= n <= len(self._steps):
             raise ValueError(f"Step {n} outside range 1..{len(self._steps)}.")
         return self._run_one(self._steps[n - 1], emulate_catch=emulate_catch, finalize=False)
@@ -797,6 +1028,10 @@ class TSQLDebugger:
         File lines are stable across step_into() expansions (unlike step
         numbers). An optional T-SQL condition is evaluated server-side with
         the current variables: dbg.break_at(42, "@code = 31000").
+
+        The line must hold a statement or a block header (IF/WHILE line) —
+        a breakpoint on a BEGIN/END/blank line never matches any step.
+        run_all() auto-expands blocks whose BODY contains a breakpoint.
         """
         self._breaks[line] = condition
         self._echo(f"breakpoint at line {line}"
@@ -857,6 +1092,8 @@ class TSQLDebugger:
         (params + defaults) and an empty log. Watches and breakpoints are
         kept. The next step() opens a fresh session.
         """
+        if self._child is not None:
+            self.abort_child()
         self.close(commit=False)
         self._steps = list(self._initial_steps)
         self._env = dict(self._initial_env)
@@ -867,6 +1104,7 @@ class TSQLDebugger:
         self._details = {}
         self._pruned_upto = 0
         self._error_msg = self._error_number = self._error_line = None
+        self._propagated_error = None
         self._rolled_back = False
         self._warned_post_rollback = False
         self._break_resume = None
@@ -966,6 +1204,8 @@ class TSQLDebugger:
                            catch_stack=tuple(parent.get("catch_ids", ())))
         for sub in subs:
             sub["depth"] = parent.get("depth", 0) + 1
+            if parent.get("loop_key") is not None:
+                sub["loop_key"] = parent["loop_key"]   # keep loop pruning effective
         return subs
 
     def _expand_if(self, step):
@@ -998,8 +1238,12 @@ class TSQLDebugger:
         # not grow the step list unboundedly (the log keeps the history)
         loop_key = step["ti"]
         prune_from = self._pos
-        while prune_from > 0 and self._steps[prune_from - 1].get("loop_key") == loop_key:
-            prune_from -= 1
+        while prune_from > 0:
+            lk = self._steps[prune_from - 1].get("loop_key")
+            if lk is not None and loop_key[0] <= lk[0] and lk[1] <= loop_key[1]:
+                prune_from -= 1     # this iteration's subs, nested loops included
+            else:
+                break
         if prune_from < self._pos:
             del self._steps[prune_from:self._pos]
             self._pos = prune_from
@@ -1026,13 +1270,33 @@ class TSQLDebugger:
         run_all() again resumes past the one it stopped at.
         """
         while not self._finished and self._pos < len(self._steps):
+            if self._child is not None:
+                if not self._child_done():
+                    self._echo("[CHILD] a child debugger is active — finish it first "
+                               "(child.run_all()) or abort_child().")
+                    return self.log_df()
+                self._finish_child()
+                continue
             step = self._steps[self._pos]
             if (self._breaks and step["kind"] in ("if_block", "while_block")
-                    and self._break_resume != self._pos):
+                    and self._break_resume != self._pos
+                    and step["line"] not in self._breaks):
                 # a breakpoint INSIDE a block only exists as a step after the
                 # block is expanded — auto step_into blocks that contain one
+                # (a breakpoint on the block's OWN line is handled below)
                 end_line = self._sql.count("\n", 0, step["e"]) + 1
-                if any(step["line"] <= bl <= end_line for bl in self._breaks):
+                if any(step["line"] < bl <= end_line for bl in self._breaks):
+                    body_text = step["text"].upper()
+                    if step.get("is_loop") and ("BREAK" in body_text
+                                                or "CONTINUE" in body_text):
+                        # step_into cannot expand this loop — stop before it
+                        # instead of silently running through the breakpoint
+                        self._break_resume = self._pos
+                        self._echo(f"[BREAK] stopped BEFORE the WHILE at line "
+                                   f"{step['line']} — it contains a breakpoint but "
+                                   "BREAK/CONTINUE prevents expansion; step() runs "
+                                   "it whole.")
+                        return self.log_df()
                     self.step_into()
                     continue
             if self._breaks and self._break_resume != self._pos:
@@ -1058,6 +1322,10 @@ class TSQLDebugger:
         for current numbers.
         """
         while not self._finished and self._pos < min(n, len(self._steps)):
+            if self._child is not None and not self._child_done():
+                self._echo("[CHILD] a child debugger is active — finish it first "
+                           "(child.run_all()) or abort_child().")
+                return self.log_df()
             self.step()
         return self.log_df()
 
@@ -1137,7 +1405,20 @@ class TSQLDebugger:
         Exception-safe: the connection is closed and released even when the
         final rollback/commit fails (dead session).
         """
+        if self._child is not None:
+            # closing the parent kills the shared session — detach the child
+            # so the parent is never left blocked on an unusable child
+            self._child._conn = None
+            self._child._cursor = None
+            self._child = None
+            self._child_call = None
         if self._conn is not None:
+            if not self._owns_connection:
+                # a child never closes the session it borrowed from the parent
+                self._conn = None
+                self._cursor = None
+                self._echo("Child detached — the parent session stays open.")
+                return self.log_df()
             try:
                 if not self._autocommit:
                     try:

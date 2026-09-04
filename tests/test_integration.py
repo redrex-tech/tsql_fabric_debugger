@@ -426,3 +426,100 @@ def test_semicolonless_procedure_debugs_statement_by_statement():
     env = dbg._env
     dbg.close()
     assert env["@A"] == 1 and env["@B"] == 2
+
+
+def test_nested_exec_step_into_end_to_end():
+    import uuid
+    from tsql_fabric_debugger.connection import connect as _connect
+
+    # unique name per run: a leftover lock from a killed previous run must
+    # never block this test (schema locks are per object name)
+    child_name = f"dbo.tsqldbg_child_{uuid.uuid4().hex[:8]}"
+    admin = _connect(autocommit=True)
+    admin_cur = admin.cursor()
+    admin_cur.execute(
+        f"CREATE PROCEDURE {child_name} "
+        "@x INT, @doubled INT OUTPUT AS BEGIN SET @doubled = @x * 2; END")
+    try:
+        parent_src = f"""
+CREATE PROCEDURE dbo.p_parent @n INT, @res INT OUTPUT AS
+BEGIN
+    SET @res = 0;
+    EXEC {child_name} @x = @n, @doubled = @res OUTPUT;
+    SET @res = @res + 1;
+END;
+"""
+        # the with-block guarantees close() even on a failing assert — otherwise
+        # the finally's DROP would deadlock against our own open transaction
+        with TSQLDebugger(sql_text=parent_src, params={"@n": 21},
+                          echo=lambda *_: None) as dbg:
+            dbg.step()                      # SET @res = 0
+            child = dbg.step_into()         # enter the EXEC
+            assert child is not None and child is not dbg
+            assert child.proc_name.split(".")[-1] in child_name
+
+            blocked = dbg.step()            # parent refuses to move past an active child
+            assert blocked is None
+
+            child.run_all()
+            assert child._env["@DOUBLED"] == 42
+
+            dbg.run_all()                   # collects OUTPUTs + runs the final SET
+            res = dbg._env["@RES"]
+            exec_entries = [e for e in dbg._log if e["kind"] == "exec"]
+        assert res == 43                    # 21*2 copied back, then +1
+        assert len(exec_entries) == 1 and exec_entries[0]["status"] == "SUCCESS"
+    finally:
+        admin_cur.execute(f"DROP PROCEDURE {child_name}")
+        admin.close()
+
+
+def test_child_unhandled_error_reaches_the_parent_catch():
+    import uuid
+    from tsql_fabric_debugger.connection import connect as _connect
+
+    boom_name = f"dbo.tsqldbg_boom_{uuid.uuid4().hex[:8]}"
+    admin = _connect(autocommit=True)
+    admin_cur = admin.cursor()
+    admin_cur.execute(
+        f"CREATE PROCEDURE {boom_name} @x INT AS "
+        "BEGIN SELECT @x = 1 / 0; END")
+    try:
+        parent_src = f"""
+CREATE PROCEDURE dbo.p_parent2 @caught NVARCHAR(400) OUTPUT, @after INT OUTPUT AS
+BEGIN
+    BEGIN TRY
+        EXEC {boom_name} @x = 1;
+        SET @after = 1;
+    END TRY
+    BEGIN CATCH
+        SET @caught = ERROR_MESSAGE();
+    END CATCH
+END;
+"""
+        with TSQLDebugger(sql_text=parent_src, params={},
+                          echo=lambda *_: None) as dbg:
+            child = dbg.step_into()      # enter the EXEC (first step of the parent)
+            child.run_all()              # child fails, no CATCH of its own
+            dbg.run_all()                # parent collects: its CATCH must run
+            env = dict(dbg._env)
+            exec_entries = [e for e in dbg._log if e["kind"] == "exec"]
+        assert exec_entries and exec_entries[0]["status"] == "ERROR"
+        assert "Divide by zero" in (env["@CAUGHT"] or "")   # parent CATCH emulated
+        assert env["@AFTER"] is None                        # rest of parent TRY skipped
+    finally:
+        admin_cur.execute(f"DROP PROCEDURE {boom_name}")
+        admin.close()
+
+
+def test_breakpoint_on_the_block_header_line_stops():
+    dbg = TSQLDebugger(sql_text=PROC_LOOP, params={}, echo=lambda *_: None)
+    dbg.break_at(6)                  # the WHILE header line itself
+    dbg.run_all()
+    assert not dbg._finished
+    assert dbg._env["@TOTAL"] == 0   # stopped BEFORE the loop ran
+    dbg.clear_breaks()
+    dbg.run_all()
+    total = dbg._env["@TOTAL"]
+    dbg.close()
+    assert total == 15
