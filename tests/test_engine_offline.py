@@ -577,3 +577,109 @@ def test_preview_chars_bounds_the_command(fake_session):
     entry = dbg.step()
     assert len(entry["command"]) <= 40
     dbg.close()
+
+
+# ---------------------------------------------------------------------------
+# second targeted round: kill real-logic engine mutants
+# ---------------------------------------------------------------------------
+def test_rollback_announces_success_only_when_it_ran(fake_session):
+    msgs = []
+    dbg = _dbg(fake_session)
+    dbg._echo = msgs.append
+    fake_session.turn(updates={"@OUT": 0})
+    dbg.step()
+    dbg.rollback()
+    assert any("data effects undone" in m for m in msgs)   # _safe_rollback returned True
+    dbg.close()
+
+
+def test_error_entry_has_no_rows_affected(fake_session):
+    dbg = _dbg(fake_session)
+    fake_session.fail("boom")
+    entry = dbg.step()
+    assert entry["status"] == "ERROR" and entry["rows_affected"] is None
+    dbg.close()
+
+
+def test_cond_step_does_not_carry_rowcount(fake_session):
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 1}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.turn(cond=1, rowcount=99)      # the condition eval
+    dbg.step_into()
+    cond = next(e for e in dbg._log if e["kind"] == "cond")
+    assert cond["rows_affected"] is None        # update_rowcount=False on conditions
+    dbg.close()
+
+
+def test_reset_clears_rolled_back(fake_session):
+    dbg = _dbg(fake_session)
+    fake_session.fail("boom")
+    dbg.step()
+    assert dbg._rolled_back
+    for v in (0, 5, 6):
+        fake_session.turn(updates={"@OUT": v})
+    dbg.reset()
+    assert dbg._rolled_back is False            # cleared on reset
+    dbg.close()
+
+
+def test_full_log_level_prints_the_whole_command(fake_session):
+    msgs = []
+    dbg = _dbg(fake_session, log_level="full")
+    dbg._echo = msgs.append
+    fake_session.turn(updates={"@OUT": 0})
+    dbg.step()
+    # full mode echoes the command body lines with a "| " prefix
+    assert any("| " in m and "SET" in m for m in msgs)
+    dbg.close()
+
+
+def test_error_severity_and_state_in_catch(fake_session):
+    sql = """
+CREATE PROCEDURE dbo.p @out NVARCHAR(100) OUTPUT AS
+BEGIN
+    BEGIN TRY
+        SET @out = N'x';
+    END TRY
+    BEGIN CATCH
+        SET @out = CONCAT(ERROR_SEVERITY(), N'/', ERROR_STATE(), N'/', ERROR_NUMBER());
+    END CATCH
+END;
+"""
+    dbg = TSQLDebugger(sql_text=sql, params={}, server="s", database="d",
+                       echo=lambda *_: None)
+    fake_session.fail("kaboom", number=8134)      # the TRY step fails
+    # the CATCH batch must bind ERROR_SEVERITY/STATE/NUMBER without KeyError
+    fake_session.turn(updates={"@OUT": "16/1/8134"})
+    dbg.run_all()
+    assert dbg._env["@OUT"] == "16/1/8134"
+    dbg.close()
+
+
+def test_watch_not_echoed_on_condition_steps(fake_session):
+    msgs = []
+    dbg = TSQLDebugger(sql_text=IFPROC, params={"@n": 1}, server="s", database="d",
+                       echo=msgs.append)
+    dbg.watch("(SELECT 1)", "w")
+    fake_session.turn(cond=1, watches={"w": 5})
+    dbg.step_into()                               # a cond step
+    # the "?? w = ..." watch echo must not fire on cond/params kinds
+    assert not any("?? w =" in m for m in msgs)
+    dbg.close()
+
+
+def test_sql_without_pandas_returns_dicts(fake_session, monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def no_pandas(name, *a, **k):
+        if name == "pandas":
+            raise ImportError("no pandas")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_pandas)
+    dbg = _dbg(fake_session)
+    fake_session.adhoc.append(("dual", ["a", "b"], [(1, 2)]))
+    out = dbg.sql("SELECT a, b FROM dual")
+    assert out == [{"a": 1, "b": 2}]              # dict path (zip columns, row)
+    dbg.close()
