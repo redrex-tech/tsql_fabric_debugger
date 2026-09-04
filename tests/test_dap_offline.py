@@ -149,9 +149,9 @@ END;
 
 
 def test_dap_unsupported_request_is_answered(fake_session, tmp_path):
-    messages = _run(_requests(("initialize", {}), ("restart", {}),
+    messages = _run(_requests(("initialize", {}), ("restartFrame", {}),
                               ("disconnect", {})))
-    bad = _by(messages, command="restart")[0]
+    bad = _by(messages, command="restartFrame")[0]
     assert bad["success"] is False and "unsupported" in bad["message"]
 
 
@@ -297,3 +297,100 @@ def test_parse_client_value_strict_numbers():
     assert _parse_client_value("nan") == "nan"
     assert _parse_client_value("1_000") == "1_000"   # not 1000
     assert _parse_client_value("-2.5e3") == -2500.0
+
+
+# ---------------------------------------------------------------------------
+# layer 1: restart, terminate, exceptionInfo, completions, logpoints
+# ---------------------------------------------------------------------------
+def test_dap_capabilities_layer1():
+    import io
+    msgs = _run(_requests(("initialize", {}), ("disconnect", {})))
+    caps = _by(msgs, command="initialize")[0]["body"]
+    for c in ("supportsRestartRequest", "supportsTerminateRequest",
+              "supportsLogPoints", "supportsExceptionInfoRequest",
+              "supportsCompletionsRequest"):
+        assert caps.get(c) is True, c
+
+
+def test_dap_restart_replays(fake_session, tmp_path):
+    fake_session.turn(updates={"@OUT": 5})       # 1st run: step 1
+    fake_session.turn(updates={"@OUT": 6})       # 1st run: step 2 (to the end)
+    fake_session.turn(updates={"@OUT": 5})       # after restart: step 1
+    fake_session.turn(updates={"@OUT": 6})       # after restart: step 2
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", _launch_args(tmp_path)),      # stopOnEntry defaults True
+        ("configurationDone", {}),
+        ("restart", {}),
+        ("continue", {"threadId": 1}),
+        ("disconnect", {}),
+    ))
+    assert _by(messages, command="restart")[0]["success"]
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    assert stops == ["entry", "entry"]           # entry, then entry again on restart
+    assert _by(messages, event="terminated")
+
+
+def test_dap_terminate(fake_session, tmp_path):
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", _launch_args(tmp_path)),
+        ("configurationDone", {}),
+        ("terminate", {}),
+        ("disconnect", {}),
+    ))
+    assert _by(messages, command="terminate")[0]["success"]
+    assert _by(messages, event="terminated")
+
+
+def test_dap_exception_info(fake_session, tmp_path):
+    fake_session.fail("Divide by zero error encountered")
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("configurationDone", {}),               # runs, hits the error, stops
+        ("exceptionInfo", {"threadId": 1}),
+        ("disconnect", {}),
+    ))
+    info = _by(messages, command="exceptionInfo")[0]
+    assert info["success"]
+    assert "Divide by zero" in info["body"]["description"]
+
+
+def test_dap_completions_suggests_variables(fake_session, tmp_path):
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", _launch_args(tmp_path)),
+        ("configurationDone", {}),
+        ("completions", {"text": "@", "column": 2}),
+        ("disconnect", {}),
+    ))
+    targets = _by(messages, command="completions")[0]["body"]["targets"]
+    labels = {t["label"] for t in targets}
+    assert "@n" in labels and "@out" in labels and "@@ROWCOUNT" in labels
+
+
+def test_dap_logpoint_via_logmessage(fake_session, tmp_path):
+    fake_session.turn(updates={"@OUT": 5}, watches={"logpoint_l4": 5})
+    fake_session.turn(updates={"@OUT": 6})
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", dict(_launch_args(tmp_path), stopOnEntry=False)),
+        ("setBreakpoints", {"source": {"path": "proc.sql"},
+                            "breakpoints": [{"line": 4, "logMessage": "out={@out}"}]}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    bps = _by(messages, command="setBreakpoints")[0]["body"]["breakpoints"]
+    assert bps == [{"verified": True, "line": 4}]
+    # logpoint never stops: the run went straight to terminated
+    stops = [e["body"]["reason"] for e in _by(messages, event="stopped")]
+    assert stops == []
+    assert _by(messages, event="terminated")
+
+
+def test_logpoint_expr_extraction():
+    from tsql_fabric_debugger.dap import _logpoint_expr
+    assert _logpoint_expr("out={@out}") == "@out"
+    assert _logpoint_expr("@fat") == "@fat"
+    assert _logpoint_expr("{@a + @b} rest") == "@a + @b"

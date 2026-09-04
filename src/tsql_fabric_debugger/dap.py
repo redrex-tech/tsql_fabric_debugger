@@ -247,8 +247,14 @@ class DapServer:
             "supportsConfigurationDoneRequest": True,
             "supportsConditionalBreakpoints": True,
             "supportsHitConditionalBreakpoints": True,
+            "supportsLogPoints": True,
             "supportsEvaluateForHovers": True,
             "supportsSetVariable": True,
+            "supportsRestartRequest": True,
+            "supportsTerminateRequest": True,
+            "supportsExceptionInfoRequest": True,
+            "supportsCompletionsRequest": True,
+            "completionTriggerCharacters": ["@"],
             "exceptionBreakpointFilters": [
                 {"filter": "caught", "label": "CATCH-handled errors",
                  "default": False},
@@ -304,9 +310,25 @@ class DapServer:
         dbg = self._root
         requested = args.get("breakpoints", [])
         results = []
-        plan = []
+        plan = []       # (line, condition, hits) for real breakpoints
+        logplan = []    # (line, expr) for logpoints
         for bp in requested:
             line = bp.get("line")
+            log_message = bp.get("logMessage")
+            if log_message is not None:
+                # a logpoint (diamond): print without stopping. VS Code sends
+                # a message with {expr} placeholders — we log the FIRST T-SQL
+                # expression in braces, or the whole text as an expression.
+                expr = _logpoint_expr(log_message)
+                try:
+                    dbg._validate_expr(expr, "logpoint")
+                except ValueError as exc:
+                    results.append({"verified": False, "line": line,
+                                    "message": str(exc)})
+                    continue
+                logplan.append((line, expr))
+                results.append({"verified": True, "line": line})
+                continue
             condition = bp.get("condition")
             note = None
             hits = None
@@ -326,12 +348,15 @@ class DapServer:
             results.append(entry)
         previous = dbg.breaks()
         dbg.clear_breaks()
+        dbg.clear_logpoints()
         for line, condition, hits in plan:
             dbg.break_at(line, condition=condition, hits=hits)
             old = previous.get(line)
             if (old and old["condition"] == condition and old["hits"] == hits
                     and not old["once"]):
                 dbg._breaks[line]["count"] = old["count"]
+        for line, expr in logplan:
+            dbg.log_at(line, expr)
         return results
 
     def _on_setBreakpoints(self, request):
@@ -476,10 +501,57 @@ class DapServer:
     def _on_stepOut(self, request):
         self._run_op(request, lambda dbg: dbg.step_out())
 
+    def _on_restart(self, request):
+        if not self._require_root(request):
+            return
+        try:
+            self._root.reset()   # rollback + replay from the top, same session
+        except Exception as exc:
+            self._respond(request, success=False, message=str(exc))
+            self._terminate()
+            return
+        self._respond(request)
+        self._start_debuggee()   # honors stopOnEntry, exactly like launch
+
+    def _on_terminate(self, request):
+        self._respond(request)
+        self._terminate()        # ROLLBACK + terminated
+
+    def _on_exceptionInfo(self, request):
+        dbg = self._active()
+        err = dbg.last_error() if dbg is not None else None
+        if err is None:
+            self._respond(request, success=False, message="no exception recorded")
+            return
+        message = err.get("error") or "T-SQL error"
+        self._respond(request, body={
+            "exceptionId": "T-SQL error",
+            "description": message,
+            "breakMode": "always",
+            "details": {"message": message, "fullTypeName": "T-SQL error"},
+        })
+
+    def _on_completions(self, request):
+        # suggest the session's @variables in the Debug Console / REPL
+        dbg = self._active()
+        targets = []
+        if dbg is not None:
+            for key in dbg._vars:
+                targets.append({"label": dbg._vars[key]["name"], "type": "variable"})
+            targets.append({"label": "@@ROWCOUNT", "type": "variable"})
+        self._respond(request, body={"targets": targets})
+
     def _on_disconnect(self, request):
         self._close_root()
         self._respond(request)
         self._running = False
+
+
+def _logpoint_expr(log_message):
+    """The T-SQL expression to log from a VS Code logpoint message: the first
+    {expr} placeholder, or the whole text when there is none."""
+    m = re.search(r"\{([^}]+)\}", log_message or "")
+    return (m.group(1) if m else (log_message or "")).strip()
 
 
 def _parse_client_value(text):
