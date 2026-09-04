@@ -111,6 +111,7 @@ dbg.show_error()      # the step that FAILED, in full — the one-call idiom
 dbg.last_results()    # result sets the procedure itself produced
 dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg")   # tracked every step
 dbg.log_at(8, "@fat")               # logpoint: print the value there, never stop
+dbg.clear_logpoints()               # remove one logpoint (by line) or all
 dbg.break_at(42, "@code = 31000")   # run_all() stops there when it's true
 dbg.break_at(8, hits=4)             # ...or from the 4th pass on (once=True: fire once)
 dbg.save_state("st.json")           # variables snapshot (JSON) ...
@@ -170,7 +171,7 @@ UTF-16 with BOM (SSMS default) or cp1252.
 | `params` | `{}` | test values for procedure parameters (`{"@year": 2015}`) |
 | `autocommit` | `False` | `True` = every step persists immediately (a warning is echoed; `close()` undoes nothing) |
 | `log_level` | `"simple"` | `"full"` prints whole commands, untruncated variables and the SQL batch on errors |
-| `stop_on_error` | `True` | stop the sequential run on an unhandled error |
+| `stop_on_error` | `True` | stop the sequential run on an unhandled error (`False`: continue past errors; `"any"`: also pause on CATCH-handled errors) |
 | `step_timeout` | `None` | per-step query timeout in seconds (`None` = unlimited) |
 | `lock_timeout` | `None` | seconds to wait for a lock before failing (error 1222) instead of hanging behind another session — the anti-hang for orphaned-transaction locks; does not prevent the orphan, only bounds the wait |
 | `max_result_rows` | `50` | rows captured per result set the procedure produces |
@@ -183,7 +184,7 @@ UTF-16 with BOM (SSMS default) or cp1252.
 ### Log columns
 
 `log_df()` / `--csv` (procedure mode): `step`, `line` (file line), `kind`
-(`stmt`/`declare`/`if_block`/`while_block`/`return`/`cond`/`catch`/`params`/`throw`),
+(`stmt`/`declare`/`if_block`/`while_block`/`cond`/`exec`/`eval`/`return`/`throw`/`params`),
 `status` (`SUCCESS`/`ERROR`/`REGISTERED`), `rows_affected` (only for captured
 steps; `None` otherwise), `duration_s`, `command` (truncated preview),
 `changed_vars` (truncated — `show_detail()` has the full values),

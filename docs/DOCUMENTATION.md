@@ -259,6 +259,9 @@ TSQLDebugger(
     step_timeout=None,        # seconds per step (None = unlimited)
     lock_timeout=None,        # seconds to wait for a lock, then fail (anti-hang)
     max_result_rows=50,       # rows kept per procedure-produced result set
+    offload_threshold=200_000,# strings bigger than this live server-side
+    history_batches=None,     # keep batch text for the last N steps (bounds
+                              #   memory on long into=True loops; None = keep all)
     echo=print,               # console sink — pass any callable
 )
 ```
@@ -305,7 +308,11 @@ accents just work.
 tsql-debug FILE.sql [--server S] [--database D]
            [--param @NAME=VALUE]...    # quote the value ('00123') to force string
            [--commit] [--csv FILE] [--log-level simple|full]
-           [--step-timeout SECONDS] [--version]
+           [--step-timeout SECONDS]    # fail a slow step instead of waiting forever
+           [--lock-timeout SECONDS]    # fail a lock-blocked step fast (error 1222)
+           [--version]
+
+tsql-debug --kill-orphans [--min-idle SECONDS]   # janitor mode: no FILE
 ```
 
 Unquoted `--param` values infer types strictly: integers without leading
@@ -315,6 +322,13 @@ zeros, decimals like `1.5` — never scientific notation, `nan` or `inf`;
 own CATCH handled it), `2` usage/file error. A file without a
 `CREATE PROCEDURE` falls back to loose-script mode with a warning
 (`--param`/`--log-level` don't apply there; `--commit` does).
+
+`--kill-orphans` runs the janitor instead of a file (see
+`kill_orphan_sessions`): it KILLs library-tagged sessions left sleeping with
+an open transaction, idle at least `--min-idle` seconds (default 900), whose
+locks would block other sessions. A polite `SIGTERM` to a running
+`tsql-debug`/`tsql-fabric-dap` already rolls its session back — the janitor
+is for processes killed with `SIGKILL` or a crashed host.
 
 ## 4. API reference
 
@@ -390,13 +404,13 @@ Lifecycle:
 |---|---|
 | `run_procedure(sql_file/sql_text/proc_name, params, server, database, commit=False, save_csv=None, **kwargs)` | Construct, `run_all()`, `close()` in a try/finally, optionally save the CSV. `**kwargs` forward to the constructor (`log_level`, `step_timeout`, ...). |
 | `fetch_source(proc_name, server, database)` | The deployed source of a procedure, straight from the warehouse (`OBJECT_DEFINITION` on a short-lived session). Raises `ValueError` when the object is missing or `VIEW DEFINITION` is denied. |
-| `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
-| `connect(server, database, autocommit=True)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
+| `run_script(sql_file/sql_text, server, database, stop_on_error=True, commit=False, lock_timeout=None)` | Loose scripts (no `CREATE PROCEDURE`): split on `GO` lines, else per statement via the scanner; executed batch-by-batch inside a transaction, ROLLBACK by default. No variable preservation. |
+| `connect(server, database, autocommit=True, lock_timeout=None)` | A raw authenticated pyodbc connection with the library's auth chain — useful for your own tooling. |
 | `kill_orphan_sessions(server, database, min_idle_seconds=900)` | KILL library-tagged sessions left sleeping with an open transaction (a debugger process killed without close()), whose locks block `OBJECT_DEFINITION`/DDL for everyone. Also `tsql-debug --kill-orphans`. CAUTION: an interactively paused debug looks like an orphan — raise the threshold on shared warehouses. |
 | `runner.split_script(sql_text)` | The batch splitter, importable on its own. |
 | `runner.save_log_csv(log, path)` | CSV persistence that works with or without pandas (utf-8-sig). |
 | `runner.count_errors(log)` | ERROR-entry count for either log shape. |
-| `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |
+| `summarize(log)` | One-line verdict of a run ("OK, all N steps" / "FAILED at step X (line Y): …", noting a CATCH recovery) — and returns the facts as a dict (`ok`, `steps`, `duration_s`, `error_step`, `error_line`, `error`, `handled`). The "just tell me what happened" helper. |
 | `diff_logs(log_a, log_b)` | Align two execution logs by (line, kind) and report only the divergences — different status/rows/variables, and steps present on one side only. |
 | `parser.read_sql_file(path)` | The multi-encoding file reader. |
 
@@ -409,8 +423,8 @@ the list above.
 `tsql-fabric-dap` (a console script installed with the package) speaks the
 Debug Adapter Protocol over stdio, so any DAP client — VS Code with a generic
 DAP bridge extension, nvim-dap, ... — can debug a `.sql` procedure visually:
-gutter breakpoints (condition and hit-count included — `hitCondition` `N`,
-`=N`, `>=N` fire from the Nth pass on), step over/into/out, the variables
+gutter breakpoints (condition and hit-count included — `hitCondition` `N`, `=N`,
+`==N`, `>=N` fire from the Nth pass on, `>N` from the N+1th), step over/into/out, the variables
 pane, evaluation and an exception breakpoint filter for CATCH-handled errors
 (`stop_on_error="any"`). Breakpoints and exception filters sent before the
 launch (the standard client order) are queued and applied at launch.
