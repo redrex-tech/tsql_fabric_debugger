@@ -127,6 +127,60 @@ export function notebookUrl(workspaceId: string, itemId: string): string {
   return `https://app.fabric.microsoft.com/groups/${workspaceId}/synapsenotebooks/${itemId}`;
 }
 
+// Download a notebook's .ipynb source from Fabric (getDefinition). Handles both
+// the synchronous (200) and long-running (202 + poll) shapes of the API.
+export async function getNotebookIpynb(
+  token: string,
+  workspaceId: string,
+  itemId: string,
+): Promise<string> {
+  const headers = { Authorization: `Bearer ${token}` };
+  const resp = await fetch(
+    `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/getDefinition?format=ipynb`,
+    { method: "POST", headers },
+  );
+
+  let result: {
+    definition?: { parts?: { path: string; payload: string }[] };
+  };
+  if (resp.status === 200) {
+    result = (await resp.json()) as typeof result;
+  } else if (resp.status === 202) {
+    const location = resp.headers.get("Location");
+    if (!location) {
+      throw new Error("Fabric getDefinition: missing operation Location.");
+    }
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const op = await fetch(location, { headers });
+      const status = ((await op.json()) as { status?: string }).status;
+      if (status === "Succeeded") {
+        break;
+      }
+      if (status === "Failed") {
+        throw new Error("Fabric getDefinition operation failed.");
+      }
+    }
+    const res = await fetch(`${location}/result`, { headers });
+    if (!res.ok) {
+      throw new Error(`Fabric getDefinition result: ${res.status}`);
+    }
+    result = (await res.json()) as typeof result;
+  } else {
+    throw new Error(
+      `Fabric getDefinition: ${resp.status} ${(await resp.text()).slice(0, 200)}`,
+    );
+  }
+
+  const part = result.definition?.parts?.find((p) =>
+    p.path.endsWith(".ipynb"),
+  );
+  if (!part) {
+    throw new Error("Fabric getDefinition: no .ipynb part in the response.");
+  }
+  return Buffer.from(part.payload, "base64").toString("utf8");
+}
+
 // Find which workspace owns a warehouse with the given SQL endpoint. Lets the
 // notebook list work when server/database were set in Settings directly,
 // without going through "Connect to Warehouse".

@@ -2,6 +2,9 @@
 
 ## 0.3.0 — preview
 
+- Clicking a notebook in **Fabric Workspace** now opens it **inside VS Code**
+  (downloads its .ipynb); the ↗ button opens it in the Fabric web UI to run.
+
 - **Brand logo**: the RedRex T-Rex on a red disc — the extension icon and the
   Activity Bar icon.
 

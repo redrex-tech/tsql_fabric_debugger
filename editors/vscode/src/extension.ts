@@ -10,6 +10,7 @@ import * as vscode from "vscode";
 import {
   FabricAuthError,
   findWorkspaceForServer,
+  getNotebookIpynb,
   getToken,
   listNotebooks,
   listWarehouses,
@@ -64,8 +65,14 @@ export function activate(context: vscode.ExtensionContext): void {
       connectToWarehouse(context, status, fabricProvider),
     ),
     vscode.commands.registerCommand("tsqlFabric.checkSetup", () => checkSetup()),
+    // Click a notebook -> open it inside VS Code (download its .ipynb source).
     vscode.commands.registerCommand(
       "tsqlFabric.openNotebook",
+      (item?: NotebookNode) => openNotebookInEditor(context, item?.notebook),
+    ),
+    // The inline button -> open in the Fabric web UI (to actually run it).
+    vscode.commands.registerCommand(
+      "tsqlFabric.openInFabric",
       (item?: NotebookNode) => {
         if (item?.notebook) {
           void vscode.env.openExternal(
@@ -248,6 +255,40 @@ async function checkSetup(): Promise<void> {
       : "• Warehouse — not connected yet (run “T-SQL Fabric: Connect to Warehouse”)",
   );
   out.appendLine("\nDone.");
+}
+
+async function openNotebookInEditor(
+  context: vscode.ExtensionContext,
+  notebook?: NotebookItem,
+): Promise<void> {
+  if (!notebook) {
+    return;
+  }
+  try {
+    const uri = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: opening "${notebook.displayName}"…`,
+      },
+      async () => {
+        const token = await getToken();
+        const ipynb = await getNotebookIpynb(
+          token,
+          notebook.workspaceId,
+          notebook.id,
+        );
+        const dir = vscode.Uri.joinPath(context.globalStorageUri, "notebooks");
+        await vscode.workspace.fs.createDirectory(dir);
+        const safe = notebook.displayName.replace(/[^\w.\- ]+/g, "_");
+        const file = vscode.Uri.joinPath(dir, `${safe}.ipynb`);
+        await vscode.workspace.fs.writeFile(file, Buffer.from(ipynb, "utf8"));
+        return file;
+      },
+    );
+    await vscode.commands.executeCommand("vscode.open", uri);
+  } catch (err) {
+    reportError(err);
+  }
 }
 
 function reportError(err: unknown): void {
@@ -496,10 +537,10 @@ class NotebookNode extends vscode.TreeItem {
     if (notebook) {
       this.iconPath = new vscode.ThemeIcon("notebook");
       this.contextValue = "fabricNotebook";
-      this.tooltip = "Open in the Fabric web UI";
+      this.tooltip = "Open in VS Code (the ↗ button opens it in Fabric)";
       this.command = {
         command: "tsqlFabric.openNotebook",
-        title: "Open in Fabric",
+        title: "Open in VS Code",
         arguments: [this],
       };
     }

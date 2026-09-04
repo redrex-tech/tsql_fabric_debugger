@@ -100,7 +100,11 @@
       },
       {
         "command": "tsqlFabric.openNotebook",
-        "title": "T-SQL Fabric: Open Notebook in Fabric",
+        "title": "T-SQL Fabric: Open Notebook in VS Code"
+      },
+      {
+        "command": "tsqlFabric.openInFabric",
+        "title": "T-SQL Fabric: Open Notebook in Fabric (browser)",
         "icon": "$(link-external)"
       },
       {
@@ -139,7 +143,7 @@
           "group": "inline"
         },
         {
-          "command": "tsqlFabric.openNotebook",
+          "command": "tsqlFabric.openInFabric",
           "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
           "group": "inline"
         }
