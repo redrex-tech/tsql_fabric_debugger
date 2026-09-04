@@ -39,9 +39,17 @@ Point the extension at your warehouse once, in Settings:
 - `tsqlFabric.pythonPath` *(optional)* — the interpreter that has the package.
   Empty reuses the one picked by the Python extension, else `python3` on PATH.
 
+## The T-SQL Fabric sidebar
+
+Click the **T-SQL Fabric** icon in the Activity Bar (left edge) to open a view
+that lists every `.sql` procedure and `.ipynb` notebook in the open folder —
+click one to open it. A `.sql` row has an inline **debug** button (▷) that
+starts a debug session for it. The view title has two buttons: **refresh** the
+list, and the **gear** to open this plugin's settings.
+
 ## Use
 
-1. Open the `.sql` file with the `CREATE PROCEDURE`.
+1. Open the `.sql` file with the `CREATE PROCEDURE` (or pick it in the sidebar).
 2. Click the gutter to set a breakpoint (condition and hit count supported via
    the breakpoint's context menu).
 3. Press **F5**. If server/database are not set, you are prompted once; the

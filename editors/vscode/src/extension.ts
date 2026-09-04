@@ -11,6 +11,8 @@ import * as vscode from "vscode";
 const TYPE = "tsql-fabric";
 
 export function activate(context: vscode.ExtensionContext): void {
+  const filesProvider = new ProjectFilesProvider();
+
   context.subscriptions.push(
     vscode.debug.registerDebugConfigurationProvider(
       TYPE,
@@ -20,11 +22,150 @@ export function activate(context: vscode.ExtensionContext): void {
       TYPE,
       new TsqlFabricAdapterFactory(),
     ),
+    vscode.window.registerTreeDataProvider("tsqlFabricFiles", filesProvider),
+
+    // The gear button in the view title: open Settings filtered to this plugin.
+    vscode.commands.registerCommand("tsqlFabric.openSettings", () => {
+      void vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        "@ext:redrex-tech.tsql-fabric-debugger-vscode",
+      );
+    }),
+    vscode.commands.registerCommand("tsqlFabric.refreshFiles", () => {
+      filesProvider.refresh();
+    }),
+    // Inline debug button on a .sql item: start a debug session for it.
+    vscode.commands.registerCommand(
+      "tsqlFabric.debugFile",
+      async (item?: FileNode) => {
+        const uri = item?.resourceUri;
+        if (!uri) {
+          return;
+        }
+        const folder = vscode.workspace.getWorkspaceFolder(uri);
+        await vscode.debug.startDebugging(folder, {
+          type: TYPE,
+          request: "launch",
+          name: `Debug ${uriBasename(uri)}`,
+          program: uri.fsPath,
+          params: {},
+          stopOnEntry: true,
+        });
+      },
+    ),
   );
+
+  // Keep the tree fresh as .sql/.ipynb files come and go.
+  const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,ipynb}");
+  watcher.onDidCreate(() => filesProvider.refresh());
+  watcher.onDidDelete(() => filesProvider.refresh());
+  context.subscriptions.push(watcher);
 }
 
 export function deactivate(): void {
   /* nothing to clean up: each session owns its own adapter process */
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar tree: the project's .sql procedures and .ipynb notebooks.
+// ---------------------------------------------------------------------------
+function uriBasename(uri: vscode.Uri): string {
+  const parts = uri.path.split("/");
+  return parts[parts.length - 1];
+}
+
+class FileNode extends vscode.TreeItem {
+  constructor(
+    label: string,
+    collapsibleState: vscode.TreeItemCollapsibleState,
+    public readonly resourceUri?: vscode.Uri,
+    kind?: "sql" | "notebook",
+  ) {
+    super(label, collapsibleState);
+    if (resourceUri) {
+      this.resourceUri = resourceUri;
+      this.tooltip = resourceUri.fsPath;
+      this.command = {
+        command: "vscode.open",
+        title: "Open",
+        arguments: [resourceUri],
+      };
+      this.iconPath = new vscode.ThemeIcon(
+        kind === "sql" ? "database" : "notebook",
+      );
+      this.contextValue = kind === "sql" ? "sqlFile" : "notebookFile";
+    } else {
+      this.iconPath = new vscode.ThemeIcon("folder");
+      this.contextValue = "group";
+    }
+  }
+}
+
+class ProjectFilesProvider implements vscode.TreeDataProvider<FileNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(element: FileNode): vscode.TreeItem {
+    return element;
+  }
+
+  async getChildren(element?: FileNode): Promise<FileNode[]> {
+    if (element) {
+      // group node -> its files
+      const kind = element.label === "Procedures (.sql)" ? "sql" : "notebook";
+      return this.files(kind);
+    }
+    const groups: FileNode[] = [];
+    if ((await this.files("sql")).length > 0) {
+      groups.push(
+        new FileNode(
+          "Procedures (.sql)",
+          vscode.TreeItemCollapsibleState.Expanded,
+        ),
+      );
+    }
+    if ((await this.files("notebook")).length > 0) {
+      groups.push(
+        new FileNode(
+          "Notebooks (.ipynb)",
+          vscode.TreeItemCollapsibleState.Expanded,
+        ),
+      );
+    }
+    return groups;
+  }
+
+  private async files(kind: "sql" | "notebook"): Promise<FileNode[]> {
+    const glob = kind === "sql" ? "**/*.sql" : "**/*.ipynb";
+    const uris = await vscode.workspace.findFiles(
+      glob,
+      "**/{node_modules,.venv,.git,dist,__pycache__}/**",
+      500,
+    );
+    uris.sort((a, b) => a.path.localeCompare(b.path));
+    return uris.map(
+      (uri) =>
+        new FileNode(
+          workspaceRelative(uri),
+          vscode.TreeItemCollapsibleState.None,
+          uri,
+          kind,
+        ),
+    );
+  }
+}
+
+function workspaceRelative(uri: vscode.Uri): string {
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  if (!folder) {
+    return uriBasename(uri);
+  }
+  const rel = uri.path.slice(folder.uri.path.length).replace(/^\//, "");
+  return rel || uriBasename(uri);
 }
 
 // ---------------------------------------------------------------------------

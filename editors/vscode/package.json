@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -28,7 +28,8 @@
   ],
   "activationEvents": [
     "onDebugResolve:tsql-fabric",
-    "onDebugDynamicConfigurations:tsql-fabric"
+    "onDebugDynamicConfigurations:tsql-fabric",
+    "onView:tsqlFabricFiles"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -37,6 +38,68 @@
         "language": "sql"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tsqlFabric",
+          "title": "T-SQL Fabric",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "tsqlFabric": [
+        {
+          "id": "tsqlFabricFiles",
+          "name": "Procedures & Notebooks",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tsqlFabricFiles",
+        "contents": "No .sql or .ipynb files found in this folder.\n[Open a folder](command:vscode.openFolder)\n[Open plugin settings](command:tsqlFabric.openSettings)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tsqlFabric.openSettings",
+        "title": "T-SQL Fabric: Open Plugin Settings",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "tsqlFabric.refreshFiles",
+        "title": "T-SQL Fabric: Refresh File List",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tsqlFabric.debugFile",
+        "title": "T-SQL Fabric: Debug this procedure",
+        "icon": "$(debug-alt)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "tsqlFabric.refreshFiles",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.openSettings",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "tsqlFabric.debugFile",
+          "when": "view == tsqlFabricFiles && viewItem == sqlFile",
+          "group": "inline"
+        }
+      ]
+    },
     "configuration": {
       "title": "T-SQL Fabric Debugger",
       "properties": {
