@@ -186,6 +186,12 @@ statement-level granularity:
 - A nested `BEGIN TRY` inside an expanded branch registers its own CATCH —
   exactly once, even across WHILE iterations (span-keyed registration).
 
+`run_all(into=True)` applies this expansion to the whole run: it drives the
+same loop as `run_all()` but takes each step with `step_into()` instead of
+`step()`, so every block is expanded automatically. It replaces the manual
+`while not dbg._finished and dbg._pos < len(dbg._steps): dbg.step_into()`
+loop — the friendly way to trace a `WHILE` end to end.
+
 ### 2.7 Stepping into a nested EXEC
 
 `step_into()` on a plain `EXEC [@ret =] schema.proc [args]` statement builds a
@@ -319,7 +325,7 @@ Navigation:
 | `list_steps()` | Print the numbered step plan without executing. `*` marks the cursor; indentation marks sub-steps from `step_into()`. Numbers change after an expansion — re-list before using them. |
 | `step()` | Run the next step ("step over": a whole `IF`/`WHILE` at once) and advance the cursor. Returns the log entry — on failure, the *error* entry, after emulating the CATCH. |
 | `step_into()` | Enter the next step when it is an `IF`/`WHILE` (see §2.6); otherwise identical to `step()`. |
-| `run_all()` | Run to the end, or until an unhandled error. Returns `log_df()`. |
+| `run_all(into=False)` | Run to the end, or until an unhandled error. Returns `log_df()`. `into=True` expands every IF/WHILE the `step_into()` way — each branch taken and each loop iteration becomes its own logged step. |
 | `run_until(target \| line=n)` | Run up to a step inclusive — the breakpoint idiom. `target` may be a step **number**, a **text** fragment (`run_until("MAX(SEQREC)")`) or `line=<n>`. |
 | `find_step(contains=... \| line=...)` | Return a step number by a text fragment of its command or by its file line — instead of hand-writing `next(i for i, s in enumerate(...))`. |
 | `jump_to(target \| line=n)` | Move the cursor to a step without executing anything before it. `target` may be a step **number**, a **text** fragment (`jump_to("@year = 2013")`) or `line=<n>`. |
@@ -358,6 +364,8 @@ Inspection:
 |---|---|
 | `log_df()` | The execution log as a DataFrame (list of dicts without pandas). Columns: `step`, `line` (file line), `kind`, `status`, `rows_affected` (None when not measured), `duration_s`, `command`, `changed_vars` (truncated), `result_sets`, `post_rollback`, `error`. |
 | `show_detail(step_no=None)` | One LOG entry in full: untruncated command and changed values, the clean and the raw driver error, captured result sets, and the exact SQL batch the debugger executed. |
+| `last_error()` | The most recent ERROR log entry as a dict, or `None` — replaces the manual `next(e for e in dbg._log if e["status"] == "ERROR")` scan. |
+| `show_error()` | `show_detail()` of that entry — the one-call idiom after a failed `run_all()`. Prints a note and returns `None` if nothing failed. |
 | `last_results(step_no=None)` | Result sets the procedure itself produced in that entry, as DataFrames (`df.attrs["truncated"]` marks the `max_result_rows` cut). |
 | `set_log_level(level)` | Switch `"simple"`/`"full"` mid-debug. |
 

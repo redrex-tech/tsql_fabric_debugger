@@ -71,6 +71,8 @@ dbg.list_steps()      # list the numbered steps, without executing
 dbg.step()            # run the next step ("step over": whole IF/WHILE)
 dbg.step_into()       # step into an IF/WHILE: evaluates the condition
                       #   server-side, picks the branch, yields sub-steps
+dbg.run_all(into=True)   # run to the end the step_into() way: every IF/WHILE
+                         #   expanded, each loop iteration its own logged step
 child = dbg.step_into()   # on an `EXEC dbo.child ...` step: fetches the child's
                           #   source from the warehouse and returns a CHILD
                           #   debugger sharing this session; debug it, then the
@@ -86,6 +88,8 @@ dbg.set_var("@sqlSrc", "...")                   # build state by hand
 dbg.run_step(17)      # run ONLY step 17 (does not move the cursor)
 dbg.set_log_level("full")   # full command + SQL batch on errors
 dbg.show_detail()     # last step in full (command + error + batch)
+dbg.show_error()      # the step that FAILED, in full — the one-call idiom
+                      #   after a failed run_all() (last_error() for the dict)
 dbg.last_results()    # result sets the procedure itself produced
 dbg.watch("(SELECT COUNT(*) FROM stg.movements)", "stg")   # tracked every step
 dbg.break_at(42, "@code = 31000")   # run_all() stops there when it's true
