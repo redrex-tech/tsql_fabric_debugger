@@ -77,6 +77,8 @@ child = dbg.step_into()   # on an `EXEC dbo.child ...` step: fetches the child's
                           #   parent's next step() collects the OUTPUT values
                           #   (an unhandled child error reaches the parent CATCH)
 dbg.run_until(15)     # run up to step 15 (breakpoint)
+dbg.run_until("MAX(SEQREC)")   # ...or up to the step whose command has that text
+dbg.jump_to(line=40)  # ...or position by file line; find_step() returns the number
 dbg.show_vars()       # state of every variable (OUTPUT params included)
 dbg.sql("SELECT COUNT(*) FROM dbo.movements")   # query on the SAME session
 dbg.jump_to(17)       # move the cursor without running earlier steps
@@ -109,10 +111,16 @@ and, on errors, the clean SQL Server message:
 ## Batch mode and CLI
 
 ```python
-from tsql_fabric_debugger import run_procedure
-df_log = run_procedure("prd_load.sql", params={"@year": 2015},
-                       server=..., database=..., save_csv="log.csv")
+from tsql_fabric_debugger import run_procedure, summarize
+
+log = run_procedure("prd_load.sql", params={"@year": 2015},
+                    server=..., database=..., save_csv="log.csv")
+summarize(log)   # "OK — all N steps ran" or "FAILED at step X (line Y): <msg>"
 ```
+
+`summarize(log)` is the "just tell me what happened" verdict — it prints one
+line and returns the facts (`ok`, `error_step`, `error_line`, `error`,
+`handled`), so you rarely need the step-by-step API for a quick check.
 
 ```bash
 tsql-debug prd_load.sql --param @year=2015 \

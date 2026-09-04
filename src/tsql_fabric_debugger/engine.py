@@ -957,14 +957,55 @@ class TSQLDebugger:
             raise ValueError(f"Step {n} outside range 1..{len(self._steps)}.")
         return self._run_one(self._steps[n - 1], emulate_catch=emulate_catch, finalize=False)
 
-    def jump_to(self, n: int) -> None:
-        """Place the cursor at step n (1-based) WITHOUT running earlier steps.
+    def find_step(self, contains: str | None = None, line: int | None = None) -> int:
+        """Find a step number by a text fragment OR by its file line — so you
+        never have to hand-write `next(i for i, s in enumerate(...))`.
+
+        find_step("MAX(SEQREC)")  -> the number of the first step whose command
+        contains that text (case-insensitive). find_step(line=38) -> the step
+        at file line 38. Raises a clear error when nothing matches; on multiple
+        text matches, returns the first and echoes a note.
+        """
+        if (contains is None) == (line is None):
+            raise ValueError("Pass exactly one of `contains` or `line`.")
+        if line is not None:
+            hits = [i for i, s in enumerate(self._steps, 1) if s["line"] == line]
+            if not hits:
+                near = sorted({s["line"] for s in self._steps})
+                raise ValueError(f"No step starts at line {line}. Step lines: {near}")
+            return hits[0]
+        needle = contains.lower()
+        hits = [i for i, s in enumerate(self._steps, 1) if needle in s["text"].lower()]
+        if not hits:
+            raise ValueError(f"No step contains {contains!r}. Try list_steps() to see them.")
+        if len(hits) > 1:
+            self._echo(f"[NOTE] {len(hits)} steps contain {contains!r} "
+                       f"(at steps {hits}); using the first, {hits[0]}.")
+        return hits[0]
+
+    def _resolve_step(self, target, line):
+        """Turn a step number, a text fragment or a line into a 1-based index."""
+        if line is not None:
+            return self.find_step(line=line)
+        if isinstance(target, str):
+            return self.find_step(contains=target)
+        if isinstance(target, int):
+            return target
+        raise ValueError("Give a step number, a text fragment, or line=<n>.")
+
+    def jump_to(self, target: "int | str | None" = None, line: int | None = None) -> None:
+        """Place the cursor at a step WITHOUT running earlier steps.
+
+        The target can be a step NUMBER, a TEXT fragment of the command
+        (jump_to("@year = 2013")), or a file LINE (jump_to(line=40)) —
+        so you don't have to look the number up by hand.
 
         Careful: variables assigned by the skipped steps keep their current
         environment values (use set_var() to build them by hand), and step
         numbers change after a step_into() expansion — re-run list_steps()
         to get current numbers.
         """
+        n = self._resolve_step(target, line)
         if not 1 <= n <= len(self._steps):
             raise ValueError(f"Step {n} outside range 1..{len(self._steps)}.")
         skipped = n - 1 - self._pos
@@ -1318,12 +1359,17 @@ class TSQLDebugger:
             self.step()
         return self.log_df()
 
-    def run_until(self, n: int) -> object:
-        """Run up to step n (inclusive) — the 'breakpoint'.
+    def run_until(self, target: "int | str | None" = None, line: int | None = None) -> object:
+        """Run up to a step (inclusive) — the 'breakpoint'.
+
+        The target can be a step NUMBER, a TEXT fragment of the command
+        (run_until("MAX(SEQREC)")), or a file LINE (run_until(line=38)) — no
+        need to compute the step number yourself.
 
         Step numbers change after step_into() expansions; re-run list_steps()
         for current numbers.
         """
+        n = self._resolve_step(target, line)
         while not self._finished and self._pos < min(n, len(self._steps)):
             if self._child is not None and not self._child_done():
                 self._echo("[CHILD] a child debugger is active — finish it first "

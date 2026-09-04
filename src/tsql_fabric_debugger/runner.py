@@ -198,3 +198,44 @@ def diff_logs(log_a, log_b):
         return pd.DataFrame(out)
     except ImportError:
         return out
+
+
+def summarize(log, echo=print) -> dict:
+    """One-glance verdict of a run — "did it all run? where did it fail?".
+
+    Reads a log (from run_procedure / TSQLDebugger.log_df / run_all) and
+    prints a plain summary, then returns the facts as a dict:
+
+        {"ok", "steps", "duration_s", "error_step", "error_line",
+         "error", "handled"}
+
+    ok      = no step ERRORed.
+    handled = an ERROR occurred but a CATCH ran afterwards (the procedure
+              recovered) — the run still reports the failing step.
+    """
+    rows = log.to_dict("records") if hasattr(log, "to_dict") else list(log)
+    steps = len(rows)
+    duration = round(sum(r.get("duration_s") or 0 for r in rows), 3)
+    err = next((r for r in rows if r.get("status") == "ERROR"), None)
+    # a CATCH ran if any later step is a catch step — recorded either as
+    # kind="catch" or (emulated) with a "[CATCH]" prefix on its command
+    handled = bool(err) and any(
+        r.get("kind") == "catch" or (r.get("command") or "").startswith("[CATCH]")
+        for r in rows)
+    info = {
+        "ok": err is None,
+        "steps": steps,
+        "duration_s": duration,
+        "error_step": err.get("step") if err else None,
+        "error_line": err.get("line") if err else None,
+        "error": err.get("error") if err else None,
+        "handled": handled,
+    }
+    if err is None:
+        echo(f"OK — all {steps} step(s) ran with no error ({duration}s). "
+             "Nothing was persisted.")
+    else:
+        tail = " (handled by a CATCH — the procedure recovered)" if handled else ""
+        echo(f"FAILED at step {err['step']} (line {err['line']}): "
+             f"{err.get('error')}{tail}")
+    return info

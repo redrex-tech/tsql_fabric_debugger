@@ -683,3 +683,70 @@ def test_sql_without_pandas_returns_dicts(fake_session, monkeypatch):
     out = dbg.sql("SELECT a, b FROM dual")
     assert out == [{"a": 1, "b": 2}]              # dict path (zip columns, row)
     dbg.close()
+
+
+# ---------------------------------------------------------------------------
+# 0.2.1 usability: find_step, jump_to/run_until by text or line
+# ---------------------------------------------------------------------------
+def test_find_step_by_text_and_line(fake_session):
+    dbg = _dbg(fake_session)              # SIMPLE: 3 SET @out statements
+    assert dbg.find_step("= @n") == 2
+    assert dbg.find_step(line=6) == 3
+    with pytest.raises(ValueError, match="No step contains"):
+        dbg.find_step("nonexistent")
+    with pytest.raises(ValueError, match="No step starts at line"):
+        dbg.find_step(line=999)
+    with pytest.raises(ValueError, match="exactly one"):
+        dbg.find_step("x", line=1)
+
+
+def test_find_step_multiple_matches_returns_first(fake_session):
+    notes = []
+    dbg = _dbg(fake_session)
+    dbg._echo = notes.append
+    n = dbg.find_step("@out")             # all 3 statements mention @out
+    assert n == 1
+    assert any("3 steps contain" in m for m in notes)
+
+
+def test_jump_to_by_text(fake_session):
+    dbg = _dbg(fake_session)
+    dbg.jump_to("= @n")               # step 2
+    assert dbg._pos == 1
+
+
+def test_run_until_by_text_and_line(fake_session):
+    dbg = _dbg(fake_session)
+    for v in (0, 5, 6):
+        fake_session.turn(updates={"@OUT": v})
+    dbg.run_until("= @n")              # runs steps 1..2
+    assert dbg._pos == 2 and dbg._env["@OUT"] == 5
+
+
+def test_summarize_ok_and_failed():
+    from tsql_fabric_debugger import summarize
+    ok_log = [{"step": 1, "line": 4, "kind": "stmt", "status": "SUCCESS", "duration_s": 0.1},
+              {"step": 2, "line": 5, "kind": "stmt", "status": "SUCCESS", "duration_s": 0.2}]
+    msgs = []
+    info = summarize(ok_log, echo=msgs.append)
+    assert info["ok"] and info["steps"] == 2 and info["error_step"] is None
+    assert any("OK" in m and "no error" in m for m in msgs)
+
+    fail_log = [{"step": 1, "line": 4, "kind": "stmt", "status": "SUCCESS", "duration_s": 0.1},
+                {"step": 2, "line": 6, "kind": "stmt", "status": "ERROR", "duration_s": 0.0,
+                 "error": "Divide by zero"}]
+    msgs = []
+    info = summarize(fail_log, echo=msgs.append)
+    assert not info["ok"] and info["error_line"] == 6 and info["error"] == "Divide by zero"
+    assert any("FAILED at step 2 (line 6)" in m for m in msgs)
+
+
+def test_summarize_handled_by_catch():
+    from tsql_fabric_debugger import summarize
+    log = [{"step": 1, "line": 6, "kind": "stmt", "status": "ERROR", "duration_s": 0.0,
+            "error": "boom"},
+           {"step": 2, "line": 10, "kind": "catch", "status": "SUCCESS", "duration_s": 0.1}]
+    msgs = []
+    info = summarize(log, echo=msgs.append)
+    assert not info["ok"] and info["handled"]
+    assert any("handled by a CATCH" in m for m in msgs)
