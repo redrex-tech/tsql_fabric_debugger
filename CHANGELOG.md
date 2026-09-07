@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 — 2026-09-07
+
+- **Result sets grouped per step**: the `tsqlFabricResultSet` DAP event now
+  carries `{line, sets: [{columns, rows, truncated}]}` — one event per step,
+  with **all** of that step's result sets under `sets`. A statement that
+  returns several result sets is delivered together instead of only the last
+  one. (Event shape change; consumers should read `sets`.)
+
 ## 0.3.1 — 2026-09-07
 
 Hardening round (concurrency + privacy review):

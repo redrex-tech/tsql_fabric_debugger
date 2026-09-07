@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   coerceParam,
+  csvCell,
   isProductionTarget,
   logpointExpressions,
   matchVariables,
+  normalizePayload,
   parseIntrospectResult,
+  toCsv,
 } from "../src/util";
 
 describe("coerceParam", () => {
@@ -166,5 +169,74 @@ describe("isProductionTarget", () => {
   });
   it("matches any one of several patterns", () => {
     expect(isProductionTarget("srv", "staging", ["prod", "staging"])).toBe(true);
+  });
+});
+
+describe("normalizePayload", () => {
+  it("passes through the new {line, sets} shape", () => {
+    const body = { line: 5, sets: [{ columns: ["a"], rows: [[1]], truncated: false }] };
+    expect(normalizePayload(body)).toEqual(body);
+  });
+  it("wraps the legacy {line, columns, rows, truncated} shape into one set", () => {
+    expect(
+      normalizePayload({ line: 3, columns: ["a", "b"], rows: [[1, 2]], truncated: true }),
+    ).toEqual({
+      line: 3,
+      sets: [{ columns: ["a", "b"], rows: [[1, 2]], truncated: true }],
+    });
+  });
+  it("defaults a missing legacy truncated flag to false", () => {
+    const p = normalizePayload({ line: 1, columns: ["a"], rows: [] });
+    expect(p?.sets[0].truncated).toBe(false);
+  });
+  it("returns undefined for an unrecognizable body", () => {
+    expect(normalizePayload(undefined)).toBeUndefined();
+    expect(normalizePayload({})).toBeUndefined();
+    expect(normalizePayload({ line: "x" })).toBeUndefined();
+    expect(normalizePayload({ line: 1 })).toBeUndefined(); // no sets, no columns/rows
+  });
+  it("rejects a non-number line even when sets are present", () => {
+    expect(
+      normalizePayload({ line: "x", sets: [{ columns: [], rows: [], truncated: false }] }),
+    ).toBeUndefined();
+  });
+  it("needs BOTH columns and rows for the legacy shape (not either)", () => {
+    expect(normalizePayload({ line: 1, columns: ["a"] })).toBeUndefined();
+    expect(normalizePayload({ line: 1, rows: [[1]] })).toBeUndefined();
+  });
+});
+
+describe("csvCell", () => {
+  it("leaves plain values unquoted", () => {
+    expect(csvCell("abc")).toBe("abc");
+    expect(csvCell(42)).toBe("42");
+  });
+  it("maps NULL (null/undefined) to an empty field", () => {
+    expect(csvCell(null)).toBe("");
+    expect(csvCell(undefined)).toBe("");
+  });
+  it("quotes fields with comma, quote or newline and doubles quotes", () => {
+    expect(csvCell("a,b")).toBe('"a,b"');
+    expect(csvCell('he said "hi"')).toBe('"he said ""hi"""');
+    expect(csvCell("line1\nline2")).toBe('"line1\nline2"');
+    expect(csvCell("carriage\rreturn")).toBe('"carriage\rreturn"');
+  });
+});
+
+describe("toCsv", () => {
+  it("builds a header + CRLF-joined rows", () => {
+    const csv = toCsv({
+      columns: ["id", "name"],
+      rows: [
+        [1, "Ann"],
+        [2, "O'Brien, Jr"],
+        [3, null],
+      ],
+      truncated: false,
+    });
+    expect(csv).toBe('id,name\r\n1,Ann\r\n2,"O\'Brien, Jr"\r\n3,');
+  });
+  it("emits just the header for an empty result set", () => {
+    expect(toCsv({ columns: ["a", "b"], rows: [], truncated: false })).toBe("a,b");
   });
 });

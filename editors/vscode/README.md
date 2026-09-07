@@ -71,8 +71,13 @@ flagged as production (see below) the status bar turns amber and reads
 When a step runs a `SELECT` (or any statement that returns rows), the rows are
 shown two ways: printed as a text table in the **Debug Console**, and opened in
 a **Result Set** grid beside the editor (columns as headers, `NULL` marked,
-theme-aware, refreshed as each new result set arrives). A `(truncated)` note
+theme-aware, refreshed as each step's results arrive). If one statement returns
+several result sets, they are stacked in the same panel. A `(truncated)` note
 appears when the engine capped the number of rows. No configuration needed.
+
+Run **T-SQL Fabric: Export Result Set to CSV** (Command Palette) to save the
+current step's result set to a file — when the step produced several, you pick
+which one. The grid itself stays script-free; the export runs in the extension.
 
 ### Works well alongside the mssql extension
 

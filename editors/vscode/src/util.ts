@@ -104,3 +104,62 @@ export function isProductionTarget(
     return needle.length > 0 && hay.includes(needle);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Result-set payloads (from the adapter's tsqlFabricResultSet event) and CSV
+// export. Kept here (vscode-free) so the data logic is unit/mutation-tested.
+// ---------------------------------------------------------------------------
+export interface ResultSet {
+  columns: string[];
+  rows: unknown[][];
+  truncated: boolean;
+}
+export interface ResultSetPayload {
+  line: number;
+  sets: ResultSet[];
+}
+
+// The adapter may send the newer {line, sets:[...]} shape or the older
+// {line, columns, rows, truncated} single-set shape — accept both so an
+// extension/lib version skew never drops the grid. Returns undefined when the
+// body is not a recognizable result-set payload.
+export function normalizePayload(body: unknown): ResultSetPayload | undefined {
+  const b = body as Record<string, unknown>;
+  if (!b || typeof b.line !== "number") {
+    return undefined;
+  }
+  if (Array.isArray(b.sets)) {
+    return { line: b.line, sets: b.sets as ResultSet[] };
+  }
+  if (Array.isArray(b.columns) && Array.isArray(b.rows)) {
+    return {
+      line: b.line,
+      sets: [
+        {
+          columns: b.columns as string[],
+          rows: b.rows as unknown[][],
+          truncated: Boolean(b.truncated),
+        },
+      ],
+    };
+  }
+  return undefined;
+}
+
+// RFC-4180-ish CSV: quote a field when it holds a comma, quote, or newline,
+// doubling embedded quotes; NULL (null/undefined) becomes an empty field.
+export function csvCell(v: unknown): string {
+  if (v === null || v === undefined) {
+    return "";
+  }
+  const s = String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+export function toCsv(set: ResultSet): string {
+  const lines = [set.columns.map(csvCell).join(",")];
+  for (const row of set.rows) {
+    lines.push(row.map(csvCell).join(","));
+  }
+  return lines.join("\r\n");
+}

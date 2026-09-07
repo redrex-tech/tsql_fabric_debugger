@@ -7,7 +7,15 @@
 // workspace's notebooks, and debug the project's .sql files.
 
 import * as vscode from "vscode";
-import { coerceParam, matchVariables, isProductionTarget } from "./util";
+import {
+  coerceParam,
+  matchVariables,
+  isProductionTarget,
+  normalizePayload,
+  toCsv,
+  type ResultSet,
+  type ResultSetPayload,
+} from "./util";
 import {
   FabricAuthError,
   findWorkspaceForServer,
@@ -180,9 +188,15 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.debug.onDidReceiveDebugSessionCustomEvent((e) => {
       if (e.event === "tsqlFabricResultSet") {
-        grid.show(e.body as ResultSetPayload);
+        const payload = normalizePayload(e.body);
+        if (payload) {
+          grid.show(payload);
+        }
       }
     }),
+    vscode.commands.registerCommand("tsqlFabric.exportResultSet", () =>
+      grid.exportCsv(),
+    ),
   );
 
   // Warm the database token in the background when a warehouse is already
@@ -213,18 +227,13 @@ export function deactivate(): void {
 // Result-set grid: a webview that shows the rows a procedure produced at a
 // step, refreshed as new result sets arrive during the debug session.
 // ---------------------------------------------------------------------------
-interface ResultSetPayload {
-  line: number;
-  columns: string[];
-  rows: unknown[][];
-  truncated: boolean;
-}
-
 class ResultSetGrid {
   private panel: vscode.WebviewPanel | undefined;
+  private last: ResultSetPayload | undefined; // for "Export Result Set to CSV"
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   show(payload: ResultSetPayload): void {
+    this.last = payload;
     if (!this.panel) {
       this.panel = vscode.window.createWebviewPanel(
         "tsqlFabricResultSet",
@@ -233,14 +242,63 @@ class ResultSetGrid {
         { enableScripts: false },
       );
       this.panel.onDidDispose(
-        () => (this.panel = undefined),
+        () => {
+          this.panel = undefined;
+          this.last = undefined;
+        },
         null,
         this.context.subscriptions,
       );
     }
     this.panel.webview.html = renderGrid(payload);
-    this.panel.title = `Result Set (line ${payload.line})`;
+    const n = payload.sets.length;
+    this.panel.title =
+      n > 1
+        ? `Result Sets (line ${payload.line})`
+        : `Result Set (line ${payload.line})`;
     this.panel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  // Save one of the last step's result sets as a CSV file (chosen when the
+  // step produced several). Runs entirely in the extension host — the webview
+  // stays script-free.
+  async exportCsv(): Promise<void> {
+    const payload = this.last;
+    if (!payload || payload.sets.length === 0) {
+      void vscode.window.showInformationMessage(
+        "T-SQL Fabric: no result set to export yet — step through a statement that returns rows.",
+      );
+      return;
+    }
+    let set = payload.sets[0];
+    if (payload.sets.length > 1) {
+      const pick = await vscode.window.showQuickPick(
+        payload.sets.map((s, i) => ({
+          label: `Result set ${i + 1}`,
+          detail: `${s.columns.join(", ")} — ${s.rows.length} row(s)`,
+          index: i,
+        })),
+        { placeHolder: "Which result set to export?" },
+      );
+      if (!pick) {
+        return;
+      }
+      set = payload.sets[pick.index];
+    }
+    const target = await vscode.window.showSaveDialog({
+      filters: { "CSV files": ["csv"] },
+      saveLabel: "Export",
+    });
+    if (!target) {
+      return;
+    }
+    await vscode.workspace.fs.writeFile(
+      target,
+      Buffer.from(toCsv(set), "utf8"),
+    );
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: exported ${set.rows.length} row(s) to ${target.fsPath}.`,
+    );
   }
 }
 
@@ -261,19 +319,28 @@ function esc(v: unknown): string {
   );
 }
 
-function renderGrid(p: ResultSetPayload): string {
-  const head = p.columns.map((c) => `<th>${esc(c)}</th>`).join("");
-  const body = p.rows
+function renderSet(s: ResultSet, index: number, total: number): string {
+  const head = s.columns.map((c) => `<th>${esc(c)}</th>`).join("");
+  const body = s.rows
     .map((r) => `<tr>${r.map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`)
     .join("");
-  const note = p.truncated
-    ? `<p class="note">Showing the first ${p.rows.length} rows (truncated).</p>`
-    : `<p class="note">${p.rows.length} row(s).</p>`;
+  const heading =
+    total > 1 ? `<h4>Result set ${index + 1} of ${total}</h4>` : "";
+  const note = s.truncated
+    ? `<p class="note">Showing the first ${s.rows.length} rows (truncated).</p>`
+    : `<p class="note">${s.rows.length} row(s).</p>`;
+  return `${heading}${note}
+<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderGrid(p: ResultSetPayload): string {
+  const sets = p.sets.map((s, i) => renderSet(s, i, p.sets.length)).join("\n");
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
 <style>
   body { font-family: var(--vscode-editor-font-family, monospace); padding: 8px; color: var(--vscode-foreground); }
   h3 { margin: 0 0 6px; font-weight: 600; }
+  h4 { margin: 16px 0 4px; font-weight: 600; color: var(--vscode-descriptionForeground); }
   .note { color: var(--vscode-descriptionForeground); margin: 4px 0 10px; }
   table { border-collapse: collapse; width: 100%; font-size: 12px; }
   th, td { border: 1px solid var(--vscode-panel-border, #8884); padding: 3px 8px; text-align: left; white-space: pre; }
@@ -281,9 +348,8 @@ function renderGrid(p: ResultSetPayload): string {
   tr:nth-child(even) td { background: var(--vscode-list-hoverBackground, #8881); }
   .null { color: var(--vscode-descriptionForeground); font-style: italic; }
 </style></head><body>
-<h3>Result set at line ${p.line}</h3>
-${note}
-<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+<h3>Result set${p.sets.length > 1 ? "s" : ""} at line ${p.line}</h3>
+${sets}
 </body></html>`;
 }
 
