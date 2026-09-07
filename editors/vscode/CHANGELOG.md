@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1 — preview
+
+Hardening round (concurrency + privacy review):
+
+- **Correct procedure list on warehouse switch**: the Warehouse Procedures
+  cache is now keyed to the connected warehouse and guarded by a generation
+  counter, so a slow list from a previous warehouse can no longer show its
+  procedures under a newly selected one.
+- **No duplicate `az` cold starts**: `getDatabaseToken` de-duplicates
+  concurrent callers onto a single in-flight promise (the activation warm-up,
+  the procedure tree and a starting debug session no longer each spawn `az`).
+- **Cancellable notebook open**: opening a Fabric notebook is now cancellable —
+  closing the progress notification aborts the Fabric polling/fetch instead of
+  finishing in the background.
+- **Result-set grid CSP**: the webview now declares an explicit
+  `Content-Security-Policy` (`default-src 'none'`) as defense in depth (scripts
+  were already disabled).
+- **Docs hygiene**: example procedure/parameter names generalized
+  (`dbo.load_sales` / `@year`).
+
 ## 0.3.0 — preview
 
 - **F5 follows the active file**: the generated launch.json config and a new

@@ -1285,10 +1285,10 @@ def test_list_parameters_via_fake(fake_session):
     # FakeSession answers registered ad-hoc queries by needle
     fake_session.adhoc.append(("information_schema.parameters",
                                ["PARAMETER_NAME", "DATA_TYPE", "PARAMETER_MODE"],
-                               [("@numAnoRef", "int", "IN"),
+                               [("@year", "int", "IN"),
                                 ("@out", "int", "INOUT")]))
-    result = list_parameters("pck_am.prd_x", "s", "d")
-    assert result == [{"name": "@numAnoRef", "type": "int", "mode": "IN"},
+    result = list_parameters("dbo.load_sales", "s", "d")
+    assert result == [{"name": "@year", "type": "int", "mode": "IN"},
                       {"name": "@out", "type": "int", "mode": "INOUT"}]
 
 

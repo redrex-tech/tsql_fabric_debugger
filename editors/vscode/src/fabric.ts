@@ -14,12 +14,20 @@ export const ACCESS_TOKEN_ENV = "FABRIC_TSQL_ACCESS_TOKEN";
 // we spawn reuses it instead of paying the Azure CLI cold start again — the
 // biggest part of "connect" latency. The token is passed to Python via env.
 let dbTokenCache: { token: string; expiresAt: number } | undefined;
+// De-duplicate concurrent acquisitions: several callers (activation warm-up,
+// the procedure tree, a starting debug session) can ask at once before the
+// cache is populated. Without this they would each spawn a separate `az`
+// cold start (thundering herd); instead they share one in-flight promise.
+let dbTokenInFlight: Promise<string> | undefined;
 
 export function getDatabaseToken(azPath = "az"): Promise<string> {
   if (dbTokenCache && dbTokenCache.expiresAt - Date.now() > 120_000) {
     return Promise.resolve(dbTokenCache.token);
   }
-  return new Promise((resolve, reject) => {
+  if (dbTokenInFlight) {
+    return dbTokenInFlight;
+  }
+  const p = new Promise<string>((resolve, reject) => {
     execFile(
       azPath,
       ["account", "get-access-token", "--resource", DATABASE_RESOURCE, "--output", "json"],
@@ -45,6 +53,14 @@ export function getDatabaseToken(azPath = "az"): Promise<string> {
       },
     );
   });
+  // Clear the in-flight slot once settled so a later call can retry/refresh.
+  dbTokenInFlight = p;
+  void p.finally(() => {
+    if (dbTokenInFlight === p) {
+      dbTokenInFlight = undefined;
+    }
+  });
+  return p;
 }
 
 // Build a child-process environment carrying the database token when we can
@@ -271,11 +287,12 @@ export async function getNotebookIpynb(
   token: string,
   workspaceId: string,
   itemId: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const headers = { Authorization: `Bearer ${token}` };
   const resp = await fetch(
     `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/getDefinition?format=ipynb`,
-    { method: "POST", headers },
+    { method: "POST", headers, signal },
   );
 
   let result: {
@@ -290,7 +307,10 @@ export async function getNotebookIpynb(
     }
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 1500));
-      const op = await fetch(location, { headers });
+      if (signal?.aborted) {
+        throw new Error("cancelled");
+      }
+      const op = await fetch(location, { headers, signal });
       const status = ((await op.json()) as { status?: string }).status;
       if (status === "Succeeded") {
         break;
@@ -299,7 +319,7 @@ export async function getNotebookIpynb(
         throw new Error("Fabric getDefinition operation failed.");
       }
     }
-    const res = await fetch(`${location}/result`, { headers });
+    const res = await fetch(`${location}/result`, { headers, signal });
     if (!res.ok) {
       throw new Error(`Fabric getDefinition result: ${res.status}`);
     }
