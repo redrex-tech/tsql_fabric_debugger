@@ -1,0 +1,66 @@
+name: Publish VS Code extension
+
+# Publishes the extension in editors/vscode to the Visual Studio Marketplace
+# (and Open VSX, if a token is set). Manual trigger — the marketplace uses a
+# Personal Access Token, not OIDC, so it must be provided as a secret:
+#   - VSCE_PAT   : Azure DevOps PAT with Marketplace > Manage, for `vsce`
+#   - OVSX_PAT   : (optional) Open VSX token, for `ovsx`
+# Add them under Settings > Secrets and variables > Actions.
+#
+# Run it from Actions > "Publish VS Code extension" > Run workflow. It builds,
+# type-checks and tests first, then publishes the version in package.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package only (.vsix artifact), do not publish"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: build and publish
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+      - name: Type-check
+        run: npm run compile-check
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package (.vsix)
+        run: npx --yes @vscode/vsce package --no-dependencies -o extension.vsix
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: editors/vscode/extension.vsix
+
+      - name: Publish to Visual Studio Marketplace
+        if: ${{ inputs.dry_run == false }}
+        run: npx --yes @vscode/vsce publish --no-dependencies --packagePath extension.vsix
+
+      - name: Publish to Open VSX
+        if: ${{ inputs.dry_run == false && env.OVSX_PAT != '' }}
+        run: npx --yes ovsx publish extension.vsix

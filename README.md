@@ -8,6 +8,16 @@ Warehouse** — without changing a single line of your `.sql`.
 > usage from a local machine, a Fabric notebook or AI agents/MCP — lives in
 > [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md).
 
+This repository is a **monorepo** with two published packages:
+
+| Package | What it is | Where | Install |
+| --- | --- | --- | --- |
+| **`tsql-fabric-debugger`** | the debug engine + DAP adapter + CLI (Python) | this root, [`src/`](src/) | `pip install tsql-fabric-debugger` |
+| **T-SQL Fabric Debugger** | the VS Code extension (a GUI over the DAP adapter) | [`editors/vscode/`](editors/vscode/) | VS Code Marketplace |
+
+The extension drives the library's adapter, so debug the `.sql` visually
+(F5) or script it in Python — same engine underneath.
+
 ## Why
 
 The Fabric Warehouse has no T-SQL debugger: no breakpoints, no watch, no way

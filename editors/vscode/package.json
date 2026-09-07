@@ -7,11 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode"
+    "url": "https://github.com/redrex-tech/tsql_fabric_debugger.git",
+    "directory": "editors/vscode"
   },
-  "homepage": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode#readme",
+  "homepage": "https://github.com/redrex-tech/tsql_fabric_debugger/tree/main/editors/vscode#readme",
   "bugs": {
-    "url": "https://github.com/redrex-tech/tsql-fabric-debugger-vscode/issues"
+    "url": "https://github.com/redrex-tech/tsql_fabric_debugger/issues"
   },
   "icon": "media/logo.png",
   "engines": {
