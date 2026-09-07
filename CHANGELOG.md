@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — 2026-09-07
+
+Hardening round (concurrency + privacy review):
+
+- **`save_state()` privacy**: the docstring and the on-save message now warn
+  that the JSON file is plain-text and may contain warehouse/production data —
+  store it safely and delete when done.
+- **Teardown robustness**: `dap.py` `_close_root` detaches the debugger before
+  closing, so a `SIGTERM`/`SIGINT` arriving mid-`close()` cannot leave a
+  half-torn-down session (idempotent even under `BaseException`).
+- **Docs hygiene**: example procedure/parameter names generalized
+  (`dbo.load_sales` / `@year`) across README, docstrings and the CHANGELOG —
+  no internal/proprietary identifiers in the published package.
+
 ## 0.3.0 — 2026-09-04
 
 Debugger parity with mainstream tools (pdb/debugpy, Chrome DevTools), driven
@@ -57,7 +71,7 @@ without close() leaves its transaction open, holding locks):
 Usability (driven by end-user feedback):
 
 - **`proc_name=`**: debug a DEPLOYED procedure by name — no more manual
-  `OBJECT_DEFINITION` boilerplate. `TSQLDebugger(proc_name="pck_am.prd_x", ...)`
+  `OBJECT_DEFINITION` boilerplate. `TSQLDebugger(proc_name="dbo.load_sales", ...)`
   and `run_procedure(proc_name=..., ...)` fetch the source straight from the
   warehouse on a short-lived session (a name without schema resolves to dbo).
   Exactly one of `sql_file`/`sql_text`/`proc_name` must be given.

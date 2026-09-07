@@ -74,8 +74,8 @@ No local `.sql`? Debug the **deployed** procedure by name — the source is
 fetched straight from the warehouse (`OBJECT_DEFINITION`):
 
 ```python
-dbg = TSQLDebugger(proc_name="pck_am.prd_crgodsrec",
-                   params={"@numAnoRef": 2015}, server=..., database=...)
+dbg = TSQLDebugger(proc_name="dbo.load_sales",
+                   params={"@year": 2015}, server=..., database=...)
 ```
 
 Prefer the context-manager form — it guarantees ROLLBACK + close even when an

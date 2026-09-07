@@ -127,8 +127,8 @@ Auto-generated on first F5, or add it yourself:
   "type": "tsql-fabric",
   "request": "launch",
   "name": "Debug T-SQL procedure",
-  "program": "${file}",            // OR "procName": "pck_am.prd_crgodsrec"
-  "params": { "@numAnoRef": 2015 },
+  "program": "${file}",            // OR "procName": "dbo.load_sales"
+  "params": { "@year": 2015 },
   "server": "xxxx.datawarehouse.fabric.microsoft.com",
   "database": "my_warehouse",
   "stopOnEntry": true,

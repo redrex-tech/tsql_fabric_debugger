@@ -1144,7 +1144,7 @@ class TSQLDebugger:
         """Place the cursor at a step WITHOUT running earlier steps.
 
         The target can be a step NUMBER, a TEXT fragment of the command
-        (jump_to("@numAnoRef = 2013")), or a file LINE (jump_to(line=40)) —
+        (jump_to("@year = 2013")), or a file LINE (jump_to(line=40)) —
         so you don't have to look the number up by hand.
 
         Careful: variables assigned by the skipped steps keep their current
@@ -1372,14 +1372,21 @@ class TSQLDebugger:
     # -- state snapshots ----------------------------------------------------
     def save_state(self, path: str | None = None) -> dict:
         """Serialize the current variable state (JSON-safe) — pair with
-        load_state() + jump_to() to resume tomorrow without replaying steps."""
+        load_state() + jump_to() to resume tomorrow without replaying steps.
+
+        PRIVACY: the variable values may hold data read from the warehouse
+        (potentially production / personal data). When ``path`` is given the
+        file is written as PLAIN-TEXT JSON, unencrypted — store it somewhere
+        safe and delete it when done.
+        """
         payload = {"procedure": self.proc_name,
                    "vars": {k: _encode_value(v) for k, v in self._env.items()}}
         if path:
             import json
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=1)
-            self._echo(f"State saved to: {path}")
+            self._echo(f"State saved to: {path} (plain-text; may contain "
+                       "warehouse data — keep it safe).")
         return payload
 
     def load_state(self, source) -> None:

@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -260,7 +260,7 @@
               },
               "params": {
                 "type": "object",
-                "description": "Parameter values, e.g. { \"@numAnoRef\": 2015 }.",
+                "description": "Parameter values, e.g. { \"@year\": 2015 }.",
                 "default": {}
               },
               "server": {
@@ -349,9 +349,9 @@
               "type": "tsql-fabric",
               "request": "launch",
               "name": "Debug deployed procedure",
-              "procName": "pck_am.prd_crgodsrec",
+              "procName": "dbo.load_sales",
               "params": {
-                "@numAnoRef": 2015
+                "@year": 2015
               },
               "stopOnEntry": true
             }

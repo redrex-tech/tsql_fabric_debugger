@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tsql-fabric-debugger"
-version = "0.3.0"
+version = "0.3.1"
 description = "Step-by-step debugger for T-SQL stored procedures on the Microsoft Fabric Warehouse"
 readme = "README.md"
 license = "MIT"
@@ -47,6 +47,24 @@ Issues = "https://github.com/redrex-tech/tsql_fabric_debugger/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tsql_fabric_debugger"]
+
+[tool.hatch.build.targets.sdist]
+# Keep the source distribution lean: the Python package, its tests and docs.
+# Without this, Hatchling sweeps in editors/vscode/node_modules (~45 MB) —
+# nested .gitignores are not honored, so exclude the whole VS Code tree here.
+include = [
+    "src/tsql_fabric_debugger",
+    "tests",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "editors",
+    "**/node_modules",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
