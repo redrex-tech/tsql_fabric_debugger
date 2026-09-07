@@ -54,12 +54,16 @@ export function getDatabaseToken(azPath = "az"): Promise<string> {
     );
   });
   // Clear the in-flight slot once settled so a later call can retry/refresh.
+  // Use then(clear, clear) — not finally — so this cleanup branch handles the
+  // rejection too and never surfaces as an unhandled rejection (the returned
+  // `p` is what callers await and handle).
   dbTokenInFlight = p;
-  void p.finally(() => {
+  const clear = () => {
     if (dbTokenInFlight === p) {
       dbTokenInFlight = undefined;
     }
-  });
+  };
+  p.then(clear, clear);
   return p;
 }
 
