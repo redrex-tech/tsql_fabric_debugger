@@ -159,12 +159,15 @@ class DapServer:
         self._event("stopped", body)
 
     def _close_root(self):
-        if self._root is not None:
+        # Detach first, so teardown stays idempotent even if close() is cut
+        # short by a signal (SystemExit/KeyboardInterrupt are BaseException,
+        # not Exception): a second pass finds self._root already None.
+        root, self._root = self._root, None
+        if root is not None:
             try:
-                self._root.close()          # ROLLBACK — the adapter never commits
+                root.close()                # ROLLBACK — the adapter never commits
             except Exception:
                 pass
-            self._root = None
 
     def _terminate(self):
         self._close_root()

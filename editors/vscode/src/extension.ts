@@ -270,6 +270,7 @@ function renderGrid(p: ResultSetPayload): string {
     ? `<p class="note">Showing the first ${p.rows.length} rows (truncated).</p>`
     : `<p class="note">${p.rows.length} row(s).</p>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
 <style>
   body { font-family: var(--vscode-editor-font-family, monospace); padding: 8px; color: var(--vscode-foreground); }
   h3 { margin: 0 0 6px; font-weight: 600; }
@@ -548,14 +549,23 @@ async function openNotebookInEditor(
       {
         location: vscode.ProgressLocation.Notification,
         title: `T-SQL Fabric: opening "${notebook.displayName}"…`,
+        cancellable: true,
       },
-      async () => {
+      async (_progress, cancelToken) => {
+        // Bridge VS Code's CancellationToken to an AbortSignal so closing the
+        // progress notification actually stops the Fabric polling/fetch.
+        const ac = new AbortController();
+        cancelToken.onCancellationRequested(() => ac.abort());
         const token = await getToken();
         const ipynb = await getNotebookIpynb(
           token,
           notebook.workspaceId,
           notebook.id,
+          ac.signal,
         );
+        if (cancelToken.isCancellationRequested) {
+          return undefined;
+        }
         const dir = vscode.Uri.joinPath(context.globalStorageUri, "notebooks");
         await vscode.workspace.fs.createDirectory(dir);
         const safe = notebook.displayName.replace(/[^\w.\- ]+/g, "_");
@@ -564,7 +574,9 @@ async function openNotebookInEditor(
         return file;
       },
     );
-    await vscode.commands.executeCommand("vscode.open", uri);
+    if (uri) {
+      await vscode.commands.executeCommand("vscode.open", uri);
+    }
   } catch (err) {
     reportError(err);
   }
@@ -890,9 +902,13 @@ class ProceduresProvider implements vscode.TreeDataProvider<ProcNode> {
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
   private _cache: Procedure[] | undefined;
+  private _cacheKey: string | undefined; // server+database the cache belongs to
+  private _gen = 0; // bumped on refresh to discard in-flight loads
 
   refresh(): void {
     this._cache = undefined;
+    this._cacheKey = undefined;
+    this._gen++;
     this._onDidChange.fire();
   }
 
@@ -939,12 +955,23 @@ class ProceduresProvider implements vscode.TreeDataProvider<ProcNode> {
     server: string,
     database: string,
   ): Promise<Procedure[] | null> {
-    if (this._cache) {
+    const key = `${server}\n${database}`;
+    // Serve the cache only when it belongs to the warehouse being asked for —
+    // a stale cache from a previous warehouse must not answer for this one.
+    if (this._cache && this._cacheKey === key) {
       return this._cache;
     }
+    const gen = this._gen;
     try {
-      this._cache = await listProcedures(resolvePython(), server, database);
-      return this._cache;
+      const procs = await listProcedures(resolvePython(), server, database);
+      // Commit only if no refresh (e.g. a warehouse switch) happened while we
+      // waited — otherwise a slow load for the old warehouse would poison the
+      // cache for the new one.
+      if (gen === this._gen) {
+        this._cache = procs;
+        this._cacheKey = key;
+      }
+      return procs;
     } catch (err) {
       void vscode.window.showErrorMessage(
         `T-SQL Fabric: could not list procedures — ${(err as Error).message}`,
@@ -1079,10 +1106,12 @@ class FabricWorkspaceProvider
 {
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
+  private _gen = 0; // bumped on refresh to discard in-flight discovery
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   refresh(): void {
+    this._gen++;
     this._onDidChange.fire();
   }
   getTreeItem(e: NotebookNode): vscode.TreeItem {
@@ -1097,6 +1126,7 @@ class FabricWorkspaceProvider
     if (!wsId && !server) {
       return [new NotebookNode("Not connected — run “Connect to Warehouse”.")];
     }
+    const gen = this._gen;
     try {
       const token = await getToken();
       // Configured via Settings (no explicit Connect)? Discover the workspace
@@ -1110,7 +1140,11 @@ class FabricWorkspaceProvider
             ),
           ];
         }
-        await this.context.workspaceState.update(WS_KEY, wsId);
+        // Don't persist a discovery that a refresh (warehouse switch) has
+        // already superseded while we were awaiting the network.
+        if (gen === this._gen) {
+          await this.context.workspaceState.update(WS_KEY, wsId);
+        }
       }
       if (!wsId) {
         return [new NotebookNode("Not connected — run “Connect to Warehouse”.")];

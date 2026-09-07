@@ -1372,14 +1372,21 @@ class TSQLDebugger:
     # -- state snapshots ----------------------------------------------------
     def save_state(self, path: str | None = None) -> dict:
         """Serialize the current variable state (JSON-safe) — pair with
-        load_state() + jump_to() to resume tomorrow without replaying steps."""
+        load_state() + jump_to() to resume tomorrow without replaying steps.
+
+        PRIVACY: the variable values may hold data read from the warehouse
+        (potentially production / personal data). When ``path`` is given the
+        file is written as PLAIN-TEXT JSON, unencrypted — store it somewhere
+        safe and delete it when done.
+        """
         payload = {"procedure": self.proc_name,
                    "vars": {k: _encode_value(v) for k, v in self._env.items()}}
         if path:
             import json
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=1)
-            self._echo(f"State saved to: {path}")
+            self._echo(f"State saved to: {path} (plain-text; may contain "
+                       "warehouse data — keep it safe).")
         return payload
 
     def load_state(self, source) -> None:

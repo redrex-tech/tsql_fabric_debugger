@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 — 2026-09-07
+
+Hardening round (concurrency + privacy review):
+
+- **`save_state()` privacy**: the docstring and the on-save message now warn
+  that the JSON file is plain-text and may contain warehouse/production data —
+  store it safely and delete when done.
+- **Teardown robustness**: `dap.py` `_close_root` detaches the debugger before
+  closing, so a `SIGTERM`/`SIGINT` arriving mid-`close()` cannot leave a
+  half-torn-down session (idempotent even under `BaseException`).
+- **Docs hygiene**: example procedure/parameter names generalized
+  (`dbo.load_sales` / `@year`) across README, docstrings and the CHANGELOG —
+  no internal/proprietary identifiers in the published package.
+
 ## 0.3.0 — 2026-09-04
 
 Debugger parity with mainstream tools (pdb/debugpy, Chrome DevTools), driven
