@@ -51,8 +51,9 @@ commits; disconnect rolls back.
 
 Rows a step returns are surfaced two ways: printed as a text table to the
 Debug Console, and emitted as a `tsqlFabricResultSet` custom DAP event
-(`{line, columns, rows, truncated}`) so a client can render them in a grid —
-the VS Code extension shows a **Result Set** panel beside the editor.
+(`{line, sets: [{columns, rows, truncated}]}` — one event per step, carrying
+all of that step's result sets) so a client can render them in a grid — the
+VS Code extension shows a **Result Set** panel beside the editor.
 
 A **VS Code extension** that wires this up (F5 on a `.sql`, no launch.json
 needed) lives in [`editors/vscode/`](editors/vscode/) — preview/MVP.

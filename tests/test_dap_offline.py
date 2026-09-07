@@ -487,8 +487,35 @@ def test_dap_emits_result_set_event_and_console(fake_session, tmp_path):
           and m.get("event") == "tsqlFabricResultSet"]
     assert rs, "no tsqlFabricResultSet event"
     body = rs[0]["body"]
-    assert body["columns"] == ["a", "b"] and body["rows"] == [[1, "x"]]
+    assert len(body["sets"]) == 1
+    assert body["sets"][0]["columns"] == ["a", "b"]
+    assert body["sets"][0]["rows"] == [[1, "x"]]
     # also printed to the console
     console = "".join(e["body"]["output"] for e in messages
                       if e.get("event") == "output")
     assert "result set" in console and "a | b" in console
+
+
+def test_dap_groups_multiple_result_sets_of_one_step(fake_session, tmp_path):
+    # a single statement returning TWO result sets -> one event carrying both
+    sql = tmp_path / "multi.sql"
+    sql.write_text(
+        "CREATE PROCEDURE dbo.m AS\n"
+        "BEGIN\n"
+        "    SELECT 1 AS a; SELECT 2 AS b, 3 AS c;\n"
+        "END;\n", encoding="utf-8")
+    fake_session.turn(resultsets=[(["a"], [[1]]),
+                                  (["b", "c"], [[2, 3]])])
+    messages = _run(_requests(
+        ("initialize", {}),
+        ("launch", {"program": str(sql), "params": {}, "server": "s",
+                    "database": "d", "stopOnEntry": False}),
+        ("configurationDone", {}),
+        ("disconnect", {}),
+    ))
+    rs = [m for m in messages if m.get("event") == "tsqlFabricResultSet"]
+    assert len(rs) == 1, "the step's result sets should arrive in one event"
+    sets = rs[0]["body"]["sets"]
+    assert len(sets) == 2
+    assert sets[0]["columns"] == ["a"] and sets[0]["rows"] == [[1]]
+    assert sets[1]["columns"] == ["b", "c"] and sets[1]["rows"] == [[2, 3]]
