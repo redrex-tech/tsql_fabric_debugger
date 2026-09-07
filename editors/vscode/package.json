@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -97,6 +97,11 @@
       {
         "command": "tsqlFabric.checkSetup",
         "title": "T-SQL Fabric: Check Setup"
+      },
+      {
+        "command": "tsqlFabric.exportResultSet",
+        "title": "T-SQL Fabric: Export Result Set to CSV",
+        "icon": "$(save-as)"
       },
       {
         "command": "tsqlFabric.killOrphans",

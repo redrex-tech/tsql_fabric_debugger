@@ -230,22 +230,31 @@ class DapServer:
     def _emit_result_sets(self, log_before):
         """Surface any result sets the procedure produced in the steps that
         just ran: printed to the Debug Console AND sent as a custom event so
-        the extension can show them in a grid."""
+        the extension can show them in a grid.
+
+        One event per producing step, carrying ALL of that step's result sets
+        under ``sets`` — a statement that returns several result sets shows
+        them together instead of only the last one.
+        """
         dbg = self._active()
         if dbg is None:
             return
         for entry in dbg._log[log_before:]:
             if not entry.get("result_sets"):
                 continue
+            sets = []
             for rs in dbg._details.get(entry["step"], {}).get("resultsets", []):
                 cols, rows = rs["columns"], rs["rows"]
                 self._output(_format_table(cols, rows, rs["truncated"],
                                            entry["line"]))
-                self._event("tsqlFabricResultSet", {
-                    "line": entry["line"], "columns": cols,
+                sets.append({
+                    "columns": cols,
                     "rows": [[_json_safe(v) for v in r] for r in rows],
                     "truncated": rs["truncated"],
                 })
+            if sets:
+                self._event("tsqlFabricResultSet",
+                            {"line": entry["line"], "sets": sets})
 
     # -- request handlers ---------------------------------------------------
     def serve(self):

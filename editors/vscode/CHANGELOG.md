@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 — preview
+
+- **All of a step's result sets are shown**: when one statement returns several
+  result sets, they are stacked in the Result Set panel instead of the panel
+  showing only the last one.
+- **Export to CSV**: new command **T-SQL Fabric: Export Result Set to CSV**
+  saves the current step's result set to a file (pick which one when a step
+  produced several). Runs in the extension host — the webview stays
+  script-free (RFC-4180 quoting, `NULL` → empty field).
+- Tolerates lib/extension version skew: the grid accepts both the new
+  `{line, sets}` and the legacy `{line, columns, rows, truncated}` event shape.
+
 ## 0.3.1 — preview
 
 Hardening round (concurrency + privacy review):
