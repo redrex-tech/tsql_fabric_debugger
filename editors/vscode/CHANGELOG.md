@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3 — preview
+
+- **New branding**: the marketplace logo and the Activity Bar icon are now the
+  RedRex T-Rex (red square logo; a monochrome `currentColor` silhouette for the
+  Activity Bar that follows the theme). No functional changes.
+
 ## 0.3.2 — preview
 
 - **All of a step's result sets are shown**: when one statement returns several
