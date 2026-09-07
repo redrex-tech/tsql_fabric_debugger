@@ -1,5 +1,19 @@
 # Contributing
 
+## Repository layout
+
+This is a **monorepo** with two published packages:
+
+- **`tsql-fabric-debugger`** — the Python library (debug engine, DAP adapter,
+  CLI). Lives at the repo root: [`src/`](src/), [`tests/`](tests/),
+  [`docs/`](docs/), `pyproject.toml`. Published to **PyPI**.
+- **T-SQL Fabric Debugger** — the VS Code extension, a GUI over the DAP
+  adapter. Lives in [`editors/vscode/`](editors/vscode/) with its own
+  `package.json`, tests and CHANGELOG. Published to the **VS Code
+  Marketplace**.
+
+CI (`.github/workflows/ci.yml`) tests both on every push/PR.
+
 ## Development setup
 
 ```bash
@@ -29,10 +43,26 @@ update tests with any behavior change, and keep the CHANGELOG current.
 
 ## Releasing
 
-1. Bump `version` in `pyproject.toml` and update `CHANGELOG.md`.
+The two packages version and ship independently.
+
+### Library → PyPI
+
+1. Bump `version` in `pyproject.toml` **and** `src/tsql_fabric_debugger/__init__.py`,
+   update `CHANGELOG.md`.
 2. Merge to `main`.
-3. Dry-run: run the **Publish** workflow manually targeting TestPyPI, then
-   `pip install -i https://test.pypi.org/simple/ tsql-fabric-debugger` in a
-   clean venv and smoke-test.
-4. Publish a GitHub Release — the workflow uploads to PyPI via Trusted
-   Publishing (OIDC, no stored token).
+3. Dry-run: run the **Publish to PyPI** workflow manually targeting TestPyPI,
+   then `pip install -i https://test.pypi.org/simple/ tsql-fabric-debugger` in
+   a clean venv and smoke-test.
+4. Publish a GitHub Release (tag `vX.Y.Z`) — the workflow uploads to PyPI via
+   Trusted Publishing (OIDC, no stored token). The PyPI trusted publisher must
+   match repo `redrex-tech/tsql_fabric_debugger`, workflow `publish.yml`,
+   environment `pypi`.
+
+### Extension → VS Code Marketplace
+
+1. Bump `version` in `editors/vscode/package.json`, update its `CHANGELOG.md`,
+   merge to `main`.
+2. Add the `VSCE_PAT` secret once (Azure DevOps PAT with Marketplace > Manage
+   for publisher `redrex-tech`); optionally `OVSX_PAT` for Open VSX.
+3. Run the **Publish VS Code extension** workflow from the Actions tab. Use the
+   `dry_run` input first to get a `.vsix` artifact without publishing.
