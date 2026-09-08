@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -29,6 +29,7 @@
     "debugger"
   ],
   "activationEvents": [
+    "onLanguage:sql",
     "onDebugResolve:tsql-fabric",
     "onDebugDynamicConfigurations:tsql-fabric",
     "onView:tsqlFabricFiles",
@@ -105,6 +106,10 @@
         "icon": "$(save-as)"
       },
       {
+        "command": "tsqlFabric.toggleBreakpointLines",
+        "title": "T-SQL Fabric: Toggle Breakpoint-able Line Hints"
+      },
+      {
         "command": "tsqlFabric.killOrphans",
         "title": "T-SQL Fabric: Kill Orphan Debug Sessions",
         "icon": "$(trash)"
@@ -147,6 +152,16 @@
         "command": "tsqlFabric.debugProcedure",
         "title": "T-SQL Fabric: Debug this procedure",
         "icon": "$(debug-alt)"
+      },
+      {
+        "command": "tsqlFabric.openProcedureSource",
+        "title": "T-SQL Fabric: Open Source (edit & debug locally)",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "tsqlFabric.exportForFabric",
+        "title": "T-SQL Fabric: Export for Fabric deploy (.sql + notebook)",
+        "icon": "$(cloud-upload)"
       }
     ],
     "menus": {
@@ -164,12 +179,17 @@
         {
           "command": "tsqlFabric.openSettings",
           "when": "view == tsqlFabricWorkspace",
-          "group": "navigation@3"
+          "group": "navigation@9"
         },
         {
           "command": "tsqlFabric.refreshFiles",
           "when": "view == tsqlFabricFiles",
           "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.openSettings",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@9"
         },
         {
           "command": "tsqlFabric.connect",
@@ -180,6 +200,11 @@
           "command": "tsqlFabric.refreshProcedures",
           "when": "view == tsqlFabricProcedures",
           "group": "navigation@2"
+        },
+        {
+          "command": "tsqlFabric.openSettings",
+          "when": "view == tsqlFabricProcedures",
+          "group": "navigation@9"
         }
       ],
       "view/item/context": [
@@ -194,9 +219,28 @@
           "group": "inline"
         },
         {
+          "command": "tsqlFabric.openProcedureSource",
+          "when": "view == tsqlFabricProcedures && viewItem == procedure",
+          "group": "inline@2"
+        },
+        {
           "command": "tsqlFabric.openInFabric",
           "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
           "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "tsqlFabric.exportForFabric",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "tsqlFabric.exportForFabric",
+          "when": "resourceLangId == sql",
+          "group": "tsqlFabric"
         }
       ]
     },
@@ -238,6 +282,22 @@
           "items": { "type": "string" },
           "default": [],
           "markdownDescription": "Warehouse names or endpoint substrings you consider **production**. Debugging one of these asks for confirmation first (a debug session holds locks while paused) and marks the status bar. Example: `[\"wh_prod\", \"prod.datawarehouse\"]`."
+        },
+        "tsqlFabric.localFolder": {
+          "type": "string",
+          "default": "fabric",
+          "markdownDescription": "Project subfolder where **Open Source** saves a procedure's `.sql` and **Export for Fabric deploy** writes the generated `.sql` + `.ipynb`."
+        },
+        "tsqlFabric.breakpointLineHint": {
+          "type": "string",
+          "enum": ["label", "bar", "off"],
+          "enumDescriptions": [
+            "A dim 'breakpoint' label at the end of each statement line",
+            "A thin bar on the left edge of each statement line",
+            "No hint"
+          ],
+          "default": "label",
+          "markdownDescription": "How to mark the lines a breakpoint can actually pause on (statement starts). The debugger only stops at the start of each statement — a breakpoint on `BEGIN`/`END`, a blank/comment line or a continuation line never fires. Neither style sits on the gutter click target, so setting breakpoints still works. Computed offline; no connection needed."
         }
       }
     },
