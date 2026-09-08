@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -125,6 +125,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "tsqlFabric.uploadToGit",
+        "title": "T-SQL Fabric: Commit & Push Fabric folder (Git)",
+        "icon": "$(repo-push)"
+      },
+      {
         "command": "tsqlFabric.refreshWorkspace",
         "title": "T-SQL Fabric: Refresh Fabric Workspace",
         "icon": "$(refresh)"
@@ -182,9 +187,14 @@
           "group": "navigation@9"
         },
         {
-          "command": "tsqlFabric.refreshFiles",
+          "command": "tsqlFabric.uploadToGit",
           "when": "view == tsqlFabricFiles",
           "group": "navigation@1"
+        },
+        {
+          "command": "tsqlFabric.refreshFiles",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@2"
         },
         {
           "command": "tsqlFabric.openSettings",
@@ -242,63 +252,97 @@
         }
       ]
     },
-    "configuration": {
-      "title": "T-SQL Fabric Debugger",
-      "properties": {
-        "tsqlFabric.server": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Default Fabric Warehouse SQL endpoint (e.g. `xxxx.datawarehouse.fabric.microsoft.com`). Used when a launch configuration omits `server`."
-        },
-        "tsqlFabric.database": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Default warehouse name. Used when a launch configuration omits `database`."
-        },
-        "tsqlFabric.pythonPath": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Python interpreter that has `tsql-fabric-debugger` installed. Empty = use the interpreter selected by the Python extension, else `python3` on PATH."
-        },
-        "tsqlFabric.adapterCommand": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Override the debug adapter command. Empty = run `<python> -m tsql_fabric_debugger.dap`. Set to `tsql-fabric-dap` to use the installed console script directly."
-        },
-        "tsqlFabric.lockTimeout": {
-          "type": "number",
-          "default": 30,
-          "markdownDescription": "Seconds a debug step waits on a lock before failing (SET LOCK_TIMEOUT). Bounds how long a paused debug can block other sessions on a shared/production warehouse. `0` disables (wait forever — not recommended)."
-        },
-        "tsqlFabric.stepTimeout": {
-          "type": "number",
-          "default": 0,
-          "markdownDescription": "Seconds a single step may run before it is cancelled. `0` = no limit. Set a limit on production to bound heavy statements."
-        },
-        "tsqlFabric.productionWarehouses": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "markdownDescription": "Warehouse names or endpoint substrings you consider **production**. Debugging one of these asks for confirmation first (a debug session holds locks while paused) and marks the status bar. Example: `[\"wh_prod\", \"prod.datawarehouse\"]`."
-        },
-        "tsqlFabric.localFolder": {
-          "type": "string",
-          "default": "fabric",
-          "markdownDescription": "Project subfolder where **Open Source** saves a procedure's `.sql` and **Export for Fabric deploy** writes the generated `.sql` + `.ipynb`."
-        },
-        "tsqlFabric.breakpointLineHint": {
-          "type": "string",
-          "enum": ["label", "bar", "off"],
-          "enumDescriptions": [
-            "A dim 'breakpoint' label at the end of each statement line",
-            "A thin bar on the left edge of each statement line",
-            "No hint"
-          ],
-          "default": "label",
-          "markdownDescription": "How to mark the lines a breakpoint can actually pause on (statement starts). The debugger only stops at the start of each statement — a breakpoint on `BEGIN`/`END`, a blank/comment line or a continuation line never fires. Neither style sits on the gutter click target, so setting breakpoints still works. Computed offline; no connection needed."
+    "configuration": [
+      {
+        "title": "Connection",
+        "properties": {
+          "tsqlFabric.server": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Default Fabric Warehouse SQL endpoint (e.g. `xxxx.datawarehouse.fabric.microsoft.com`). Used when a launch configuration omits `server`."
+          },
+          "tsqlFabric.database": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Default warehouse name. Used when a launch configuration omits `database`."
+          },
+          "tsqlFabric.pythonPath": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Python interpreter that has `tsql-fabric-debugger` installed. Empty = use the interpreter selected by the Python extension, else `python3` on PATH."
+          },
+          "tsqlFabric.adapterCommand": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Override the debug adapter command. Empty = run `<python> -m tsql_fabric_debugger.dap`. Set to `tsql-fabric-dap` to use the installed console script directly."
+          }
+        }
+      },
+      {
+        "title": "Debugging",
+        "properties": {
+          "tsqlFabric.lockTimeout": {
+            "type": "number",
+            "default": 30,
+            "markdownDescription": "Seconds a debug step waits on a lock before failing (SET LOCK_TIMEOUT). Bounds how long a paused debug can block other sessions on a shared/production warehouse. `0` disables (wait forever — not recommended)."
+          },
+          "tsqlFabric.stepTimeout": {
+            "type": "number",
+            "default": 0,
+            "markdownDescription": "Seconds a single step may run before it is cancelled. `0` = no limit. Set a limit on production to bound heavy statements."
+          },
+          "tsqlFabric.productionWarehouses": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "markdownDescription": "Warehouse names or endpoint substrings you consider **production**. Debugging one of these asks for confirmation first (a debug session holds locks while paused) and marks the status bar. Example: `[\"wh_prod\", \"prod.datawarehouse\"]`."
+          },
+          "tsqlFabric.breakpointLineHint": {
+            "type": "string",
+            "enum": ["label", "bar", "off"],
+            "enumDescriptions": [
+              "A dim 'breakpoint' label at the end of each statement line",
+              "A thin bar on the left edge of each statement line",
+              "No hint"
+            ],
+            "default": "label",
+            "markdownDescription": "How to mark the lines a breakpoint can actually pause on (statement starts). The debugger only stops at the start of each statement — a breakpoint on `BEGIN`/`END`, a blank/comment line or a continuation line never fires. Neither style sits on the gutter click target, so setting breakpoints still works. Computed offline; no connection needed."
+          }
+        }
+      },
+      {
+        "title": "Local Files & Git",
+        "properties": {
+          "tsqlFabric.localFolder": {
+            "type": "string",
+            "default": "fabric",
+            "markdownDescription": "Project subfolder where **Open Source** saves a procedure's `.sql` and **Export for Fabric deploy** writes the generated `.sql` + `.ipynb`."
+          },
+          "tsqlFabric.fileLayout": {
+            "type": "string",
+            "enum": ["schema-type", "schema", "type", "flat"],
+            "enumDescriptions": [
+              "procedures/<schema>/<name> and deploy/<schema>/<name> (by type, then schema)",
+              "<schema>/<name> (a folder per schema, no type split)",
+              "procedures/<schema>.<name> and deploy/<schema>.<name> (by type, flat name)",
+              "<schema>.<name> directly in the base folder"
+            ],
+            "default": "schema-type",
+            "markdownDescription": "How pulled sources and generated artifacts are laid out inside the base folder. `procedures/` holds what you pull from Fabric; `deploy/` holds what you generate to publish."
+          },
+          "tsqlFabric.gitRemote": {
+            "type": "string",
+            "default": "",
+            "markdownDescription": "Git remote name to push to from **Commit & Push Fabric folder**. Empty = the current branch's upstream (or `origin` on the first push). Uses your existing Git credentials via the built-in Git extension."
+          },
+          "tsqlFabric.gitCommitMessage": {
+            "type": "string",
+            "default": "Update Fabric artifacts",
+            "markdownDescription": "Default commit message suggested by **Commit & Push Fabric folder** (you can edit it each time)."
+          }
         }
       }
-    },
+    ],
     "debuggers": [
       {
         "type": "tsql-fabric",

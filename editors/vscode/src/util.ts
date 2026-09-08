@@ -181,15 +181,61 @@ export function toCreateOrAlter(sql: string): string {
 
 // A safe file base for a procedure: "schema.name" with unsafe chars collapsed
 // to "_". Brackets are stripped; an empty schema yields just the name.
+// One path segment, safe for the filesystem: brackets stripped, unsafe runs
+// collapsed to "_", surrounding "_" trimmed.
+export function fileSafeSegment(s: string): string {
+  return s
+    .replace(/[[\]]/g, "")
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 export function procFileBase(schema: string, name: string): string {
-  const clean = (s: string) =>
-    s
-      .replace(/[[\]]/g, "")
-      .replace(/[^\w.-]+/g, "_")
-      .replace(/^_+|_+$/g, "");
-  const s = clean(schema);
-  const n = clean(name) || "procedure";
+  const s = fileSafeSegment(schema);
+  const n = fileSafeSegment(name) || "procedure";
   return s ? `${s}.${n}` : n;
+}
+
+// Extract the qualified name from a CREATE [OR ALTER] PROC[EDURE] statement.
+// Returns {schema, name} (schema defaults to "dbo" when unqualified), or
+// undefined when there is no CREATE PROCEDURE.
+export function parseProcName(
+  sql: string,
+): { schema: string; name: string } | undefined {
+  const m = sql.match(
+    /\bCREATE\s+(?:OR\s+ALTER\s+)?PROC(?:EDURE)?\s+((?:\[[^\]]+\]|[\w#$@]+)(?:\s*\.\s*(?:\[[^\]]+\]|[\w#$@]+))?)/i,
+  );
+  if (!m) {
+    return undefined;
+  }
+  const parts = m[1].split(".").map((p) => p.trim().replace(/^\[|\]$/g, ""));
+  if (parts.length >= 2) {
+    return { schema: parts[parts.length - 2], name: parts[parts.length - 1] };
+  }
+  return { schema: "dbo", name: parts[0] };
+}
+
+// Relative path (no extension) for an artifact, under the chosen layout.
+// kind is "procedures" (pulled sources) or "deploy" (generated artifacts).
+export function artifactPath(
+  kind: "procedures" | "deploy",
+  schema: string,
+  name: string,
+  layout: string,
+): string {
+  const s = fileSafeSegment(schema) || "dbo";
+  const n = fileSafeSegment(name) || "procedure";
+  switch (layout) {
+    case "schema":
+      return `${s}/${n}`;
+    case "type":
+      return `${kind}/${s}.${n}`;
+    case "flat":
+      return `${s}.${n}`;
+    case "schema-type":
+    default:
+      return `${kind}/${s}/${n}`;
+  }
 }
 
 function nbSource(lines: string[]): string[] {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.5 — preview
+
+- **Settings organized into sections**: *Connection*, *Debugging*, and
+  *Local Files & Git* — easier to find what to configure.
+- **File organization** (`tsqlFabric.fileLayout`, default `schema-type`):
+  pulled sources go to `procedures/<schema>/<name>.sql` and generated artifacts
+  to `deploy/<schema>/<name>.sql` + `.ipynb`. Other layouts: `schema`, `type`,
+  `flat`. Export now derives the schema/name from the `CREATE PROCEDURE`.
+- **Commit & Push (Git)**: a dedicated button in the **Project Files** view
+  title stages the Fabric folder, prompts for a message and pushes to the
+  workspace's Git repository (your existing credentials, via the built-in Git
+  extension). Optional `tsqlFabric.gitRemote` / `tsqlFabric.gitCommitMessage`.
+
+
 ## 0.3.4 — preview
 
 - **Debug a deployed procedure with breakpoints**: **Open Source (edit & debug
