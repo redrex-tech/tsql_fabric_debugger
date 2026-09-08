@@ -114,6 +114,32 @@ async function runIntrospect(python: string, args: string[]): Promise<unknown> {
   });
 }
 
+// Lines a breakpoint can actually pause on for the given .sql — a pure,
+// OFFLINE parse (no warehouse, no token, no `az`), so it's cheap enough to run
+// as the user types. The SQL is fed on stdin (works for unsaved buffers).
+// Returns [] when the text isn't a debuggable procedure.
+export function getSteppableLines(
+  python: string,
+  sqlText: string,
+): Promise<number[]> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      python,
+      ["-m", "tsql_fabric_debugger.introspect", "steppable-lines"],
+      { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+      (_err, stdout) => {
+        try {
+          const j = JSON.parse(stdout) as { lines?: number[]; error?: string };
+          resolve(Array.isArray(j.lines) ? j.lines : []);
+        } catch {
+          resolve([]); // parse error / not a procedure → nothing to mark
+        }
+      },
+    );
+    child.stdin?.end(sqlText);
+  });
+}
+
 export async function killOrphanSessions(
   python: string,
   server: string,
@@ -147,6 +173,27 @@ export async function listParameters(
     "--database",
     database,
   ])) as ProcParameter[];
+}
+
+// Fetch a deployed procedure's source (OBJECT_DEFINITION) so it can be opened
+// as a local .sql for breakpoint debugging. Read-only; nothing is written to
+// the warehouse.
+export async function fetchProcedureSource(
+  python: string,
+  server: string,
+  database: string,
+  procName: string,
+): Promise<string> {
+  const r = (await runIntrospect(python, [
+    "fetch-source",
+    "--proc",
+    procName,
+    "--server",
+    server,
+    "--database",
+    database,
+  ])) as { source?: string };
+  return r.source ?? "";
 }
 
 // List the warehouse's deployed procedures by spawning the library's

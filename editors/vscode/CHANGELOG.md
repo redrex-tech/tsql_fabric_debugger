@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.4 — preview
+
+- **Debug a deployed procedure with breakpoints**: **Open Source (edit & debug
+  locally)** on a procedure in the Warehouse Procedures view fetches its source
+  into a local `.sql` (in `tsqlFabric.localFolder`, default `fabric/`) and opens
+  it — set breakpoints and press F5 (`program` mode). Read-only fetch; nothing
+  is written to the warehouse.
+- **Export for Fabric deploy**: on a `.sql`, generates deployable artifacts —
+  `<name>.sql` normalized to `CREATE OR ALTER PROCEDURE` and a
+  `<name>.Deploy.ipynb` notebook whose cell (re)creates the procedure in the
+  warehouse. Writes files only; **the extension never runs anything against the
+  warehouse** — you upload/run them in Fabric.
+- **Breakpoint-able line hints**: marks where a breakpoint can actually pause
+  (statement starts, **including inside IF/ELSE/WHILE/CATCH**) — so you no
+  longer place one on a `BEGIN`/`END`, blank/comment or continuation line where
+  it never fires. Two styles via `tsqlFabric.breakpointLineHint`: **`label`**
+  (default — a dim `◦ breakpoint` at the end of the line) or **`bar`** (a thin
+  left-edge bar); `off` disables. Neither sits on the gutter click target, so
+  setting breakpoints still works. Computed offline as you type.
+- **Settings gear on all three views** (Warehouse Procedures / Fabric Workspace
+  / Project Files), so it is reachable whichever section is open.
+
+
 ## 0.3.3 — preview
 
 - **New branding**: the marketplace logo and the Activity Bar icon are now the

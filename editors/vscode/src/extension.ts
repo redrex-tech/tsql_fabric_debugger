@@ -13,6 +13,9 @@ import {
   isProductionTarget,
   normalizePayload,
   toCsv,
+  toCreateOrAlter,
+  procFileBase,
+  buildDeployNotebook,
   type ResultSet,
   type ResultSetPayload,
 } from "./util";
@@ -22,6 +25,8 @@ import {
   envWithToken,
   getDatabaseToken,
   getNotebookIpynb,
+  getSteppableLines,
+  fetchProcedureSource,
   killOrphanSessions,
   getToken,
   listNotebooks,
@@ -100,6 +105,11 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       },
     ),
+    vscode.commands.registerCommand(
+      "tsqlFabric.openProcedureSource",
+      openProcedureSource,
+    ),
+    vscode.commands.registerCommand("tsqlFabric.exportForFabric", exportForFabric),
     vscode.commands.registerCommand("tsqlFabric.openSettings", () => {
       void vscode.commands.executeCommand(
         "workbench.action.openSettings",
@@ -199,6 +209,32 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  // Mark, in the gutter, which lines a breakpoint can actually pause on.
+  const stmtLines = new StatementLineDecorator(context);
+  stmtLines.refreshAllVisible();
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor((e) => stmtLines.refresh(e)),
+    vscode.workspace.onDidChangeTextDocument((e) =>
+      stmtLines.onDocChange(e.document),
+    ),
+    vscode.workspace.onDidOpenTextDocument((doc) => {
+      const ed = vscode.window.visibleTextEditors.find(
+        (e) => e.document === doc,
+      );
+      stmtLines.refresh(ed);
+    }),
+    vscode.commands.registerCommand("tsqlFabric.toggleBreakpointLines", async () => {
+      const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+      const current = cfg.get<string>("breakpointLineHint", "label");
+      const next = current === "off" ? "label" : "off";
+      await cfg.update("breakpointLineHint", next, vscode.ConfigurationTarget.Global);
+      stmtLines.refreshAllVisible();
+      void vscode.window.showInformationMessage(
+        `T-SQL Fabric: breakpoint-line hints ${next === "off" ? "off" : "on"} (style: ${next}).`,
+      );
+    }),
+  );
+
   // Warm the database token in the background when a warehouse is already
   // configured, so the first debug/procedure-list does not pay the az cold
   // start. Best-effort — failures are ignored (auth surfaces later).
@@ -212,6 +248,7 @@ export function activate(context: vscode.ExtensionContext): void {
         refreshStatus(status);
         proceduresProvider.refresh();
         fabricProvider.refresh();
+        stmtLines.refreshAllVisible();
       }
     },
     null,
@@ -221,6 +258,129 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   /* nothing to clean up: each session owns its own adapter process */
+}
+
+// ---------------------------------------------------------------------------
+// Breakpoint-line hints: mark, in the gutter, the lines a breakpoint can
+// actually pause on (statement starts). The debugger only stops at the start
+// of each parsed statement — a breakpoint on BEGIN/END, a blank/comment line
+// or a continuation line never fires. Computed offline by the library parser.
+// ---------------------------------------------------------------------------
+type BpHintStyle = "label" | "bar" | "off";
+
+class StatementLineDecorator {
+  private readonly context: vscode.ExtensionContext;
+  private type: vscode.TextEditorDecorationType | undefined;
+  private builtFor: BpHintStyle | undefined; // style `type` was built for
+  private readonly timers = new Map<string, NodeJS.Timeout>();
+
+  constructor(context: vscode.ExtensionContext) {
+    this.context = context;
+  }
+
+  private style(): BpHintStyle {
+    return vscode.workspace
+      .getConfiguration("tsqlFabric")
+      .get<BpHintStyle>("breakpointLineHint", "label");
+  }
+
+  // Build (once per style) a decoration that never sits on the gutter/glyph
+  // margin — a decoration there would swallow the breakpoint click. Both
+  // styles live in the content area, so setting a breakpoint still works.
+  private decoration(style: BpHintStyle): vscode.TextEditorDecorationType {
+    if (this.type && this.builtFor === style) {
+      return this.type;
+    }
+    this.type?.dispose();
+    const line = new vscode.ThemeColor("editorLineNumber.foreground");
+    this.type =
+      style === "bar"
+        ? vscode.window.createTextEditorDecorationType({
+            isWholeLine: true,
+            borderStyle: "solid",
+            borderWidth: "0 0 0 2px",
+            borderColor: line,
+            overviewRulerLane: vscode.OverviewRulerLane.Left,
+            overviewRulerColor: line,
+          })
+        : vscode.window.createTextEditorDecorationType({
+            after: {
+              contentText: "◦ breakpoint",
+              color: new vscode.ThemeColor("editorCodeLens.foreground"),
+              margin: "0 0 0 2em",
+              fontStyle: "italic",
+            },
+          });
+    this.context.subscriptions.push(this.type); // disposed on deactivate
+    this.builtFor = style;
+    return this.type;
+  }
+
+  // Recompute for an editor now (used on activation / editor switch / toggle).
+  refresh(editor: vscode.TextEditor | undefined): void {
+    if (!editor) {
+      return;
+    }
+    const style = this.style();
+    if (style === "off" || editor.document.languageId !== "sql") {
+      this.type?.dispose();
+      this.type = undefined;
+      this.builtFor = undefined;
+      return;
+    }
+    const deco = this.decoration(style);
+    const doc = editor.document;
+    const versionAtStart = doc.version;
+    void getSteppableLines(resolvePython(), doc.getText())
+      .then((lines) => {
+        // Only apply if the document hasn't changed under us.
+        if (doc.version !== versionAtStart) {
+          return;
+        }
+        const ranges = lines
+          .filter((n) => n >= 1 && n <= doc.lineCount)
+          .map((n) =>
+            // label sits at end of line; bar spans the whole line
+            style === "label"
+              ? doc.lineAt(n - 1).range.with({ start: doc.lineAt(n - 1).range.end })
+              : new vscode.Range(n - 1, 0, n - 1, 0),
+          );
+        for (const ed of vscode.window.visibleTextEditors) {
+          if (ed.document === doc) {
+            ed.setDecorations(deco, ranges);
+          }
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  // Debounced recompute after edits.
+  onDocChange(doc: vscode.TextDocument): void {
+    if (doc.languageId !== "sql") {
+      return;
+    }
+    const key = doc.uri.toString();
+    const prev = this.timers.get(key);
+    if (prev) {
+      clearTimeout(prev);
+    }
+    this.timers.set(
+      key,
+      setTimeout(() => {
+        this.timers.delete(key);
+        const ed = vscode.window.visibleTextEditors.find(
+          (e) => e.document === doc,
+        );
+        this.refresh(ed);
+      }, 400),
+    );
+  }
+
+  refreshAllVisible(): void {
+    for (const ed of vscode.window.visibleTextEditors) {
+      this.refresh(ed);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +803,115 @@ async function openNotebookInEditor(
     if (uri) {
       await vscode.commands.executeCommand("vscode.open", uri);
     }
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// The project folder where pulled sources and generated artifacts are written.
+function localFabricDir(): vscode.Uri | undefined {
+  const ws = vscode.workspace.workspaceFolders?.[0];
+  if (!ws) {
+    return undefined;
+  }
+  const folder = vscode.workspace
+    .getConfiguration("tsqlFabric")
+    .get<string>("localFolder", "fabric");
+  return vscode.Uri.joinPath(ws.uri, folder);
+}
+
+// Fabric → local: fetch a deployed procedure's source into a local .sql so the
+// user can set breakpoints and debug it (F5, program mode). Read-only.
+async function openProcedureSource(item?: ProcNode): Promise<void> {
+  if (!item?.proc) {
+    return;
+  }
+  const dir = localFabricDir();
+  if (!dir) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a folder/workspace first (the source is saved there).",
+    );
+    return;
+  }
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  if (!server || !database) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: connect to a warehouse first.",
+    );
+    return;
+  }
+  const name = `${item.proc.schema}.${item.proc.name}`;
+  try {
+    const src = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: fetching ${name}…`,
+      },
+      async () =>
+        toCreateOrAlter(
+          await fetchProcedureSource(resolvePython(), server, database, name),
+        ),
+    );
+    const file = vscode.Uri.joinPath(
+      dir,
+      `${procFileBase(item.proc.schema, item.proc.name)}.sql`,
+    );
+    await vscode.workspace.fs.createDirectory(dir);
+    await vscode.workspace.fs.writeFile(file, Buffer.from(src, "utf8"));
+    await vscode.window.showTextDocument(
+      await vscode.workspace.openTextDocument(file),
+    );
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: ${name} saved locally — set breakpoints and press F5 to debug.`,
+    );
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// local → Fabric: generate deployable artifacts from a local .sql — a
+// CREATE OR ALTER procedure and a notebook that deploys it. Writes files only;
+// nothing runs against the warehouse.
+async function exportForFabric(uri?: vscode.Uri): Promise<void> {
+  const doc = uri
+    ? await vscode.workspace.openTextDocument(uri)
+    : vscode.window.activeTextEditor?.document;
+  if (!doc || !doc.fileName.toLowerCase().endsWith(".sql")) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open (or select) a .sql file to export for deploy.",
+    );
+    return;
+  }
+  const dir = localFabricDir();
+  if (!dir) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a folder/workspace first (artifacts are saved there).",
+    );
+    return;
+  }
+  const sql = doc.getText();
+  const base = (doc.fileName.split(/[\\/]/).pop() ?? "procedure").replace(
+    /\.sql$/i,
+    "",
+  );
+  try {
+    await vscode.workspace.fs.createDirectory(dir);
+    const sqlFile = vscode.Uri.joinPath(dir, `${base}.sql`);
+    const nbFile = vscode.Uri.joinPath(dir, `${base}.Deploy.ipynb`);
+    await vscode.workspace.fs.writeFile(
+      sqlFile,
+      Buffer.from(toCreateOrAlter(sql), "utf8"),
+    );
+    await vscode.workspace.fs.writeFile(
+      nbFile,
+      Buffer.from(buildDeployNotebook(sql, base), "utf8"),
+    );
+    void vscode.commands.executeCommand("revealInExplorer", nbFile);
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: exported ${base}.sql and ${base}.Deploy.ipynb — upload/run them in Fabric to deploy.`,
+    );
   } catch (err) {
     reportError(err);
   }

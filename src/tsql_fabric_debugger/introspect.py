@@ -67,13 +67,58 @@ def list_parameters(proc_name, server=None, database=None, lock_timeout=30):
     return [{"name": r[0], "type": r[1], "mode": r[2]} for r in rows]
 
 
+def steppable_lines(sql_text):
+    """Line numbers a breakpoint can actually pause on for this procedure.
+
+    Pure, OFFLINE parse — no server, token or connection: the debugger slices
+    the procedure body into steps in memory, and a breakpoint pauses at the
+    start line of a statement. Lines without a statement (BEGIN/END, blank,
+    comments, a CREATE PROCEDURE header, continuation lines of a multi-line
+    statement) are not returned. Tooling (the VS Code extension) uses this to
+    show, before debugging, which lines a breakpoint will bind to.
+
+    Statements INSIDE IF/WHILE blocks and CATCH handlers are breakpoint-able
+    too (the engine expands blocks and honors inner breakpoints), so this
+    recurses through each block's branch bodies and every CATCH body — not just
+    the top-level steps. Returns a sorted list of 1-based line numbers.
+    """
+    from .engine import TSQLDebugger
+    from .parser import split_steps
+    dbg = TSQLDebugger(sql_text=sql_text, server=None, database=None,
+                       echo=lambda *_: None)
+    lines = set()
+
+    def walk(steps):
+        for step in steps:
+            lines.add(step["line"])
+            if step["kind"].endswith("_block"):
+                for branch in step["branches"]:
+                    b0, b1 = branch["body"]
+                    # fresh ctx: re-parsing a branch must not mutate dbg state
+                    ctx = {"catches": [], "span_ids": {}}
+                    walk(split_steps(dbg._sql, dbg._tokens, b0, b1, ctx))
+                    for catch in ctx["catches"]:    # a TRY nested in the block
+                        walk(catch)
+
+    walk(dbg._steps)
+    for catch in dbg._catches:                       # top-level CATCH bodies
+        walk(catch)
+    return sorted(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="tsql-fabric-introspect",
         description="List warehouse objects as JSON (for tooling).")
-    ap.add_argument("what", choices=["procedures", "parameters", "kill-orphans"],
-                    help="what to list, or the orphan-session janitor")
+    ap.add_argument("what",
+                    choices=["procedures", "parameters", "kill-orphans",
+                             "steppable-lines", "fetch-source"],
+                    help="what to list, the orphan-session janitor, the "
+                         "breakpoint-able lines of a .sql (offline), or a "
+                         "deployed procedure's source")
     ap.add_argument("--proc", help="schema.proc (required for parameters)")
+    ap.add_argument("--file", help="path to a .sql (steppable-lines); "
+                                   "omit to read the SQL from stdin")
     ap.add_argument("--server", help="SQL endpoint (or env FABRIC_TSQL_SERVER)")
     ap.add_argument("--database", help="warehouse (or env FABRIC_TSQL_DATABASE)")
     ap.add_argument("--lock-timeout", type=int, default=30, metavar="SECONDS")
@@ -86,6 +131,16 @@ def main(argv=None):
                                           min_idle_seconds=args.min_idle,
                                           echo=lambda *_: None)
             result = {"killed": killed}
+        elif args.what == "steppable-lines":
+            sql = (open(args.file, encoding="utf-8", errors="replace").read()
+                   if args.file else sys.stdin.read())
+            result = {"lines": steppable_lines(sql)}
+        elif args.what == "fetch-source":
+            if not args.proc:
+                raise ValueError("--proc is required for fetch-source")
+            from .connection import fetch_source
+            result = {"source": fetch_source(args.proc, args.server,
+                                             args.database)}
         elif args.what == "parameters":
             if not args.proc:
                 raise ValueError("--proc is required for parameters")

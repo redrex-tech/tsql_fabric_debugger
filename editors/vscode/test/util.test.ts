@@ -7,7 +7,10 @@ import {
   matchVariables,
   normalizePayload,
   parseIntrospectResult,
+  procFileBase,
+  toCreateOrAlter,
   toCsv,
+  buildDeployNotebook,
 } from "../src/util";
 
 describe("coerceParam", () => {
@@ -238,5 +241,113 @@ describe("toCsv", () => {
   });
   it("emits just the header for an empty result set", () => {
     expect(toCsv({ columns: ["a", "b"], rows: [], truncated: false })).toBe("a,b");
+  });
+});
+
+describe("toCreateOrAlter", () => {
+  it("converts CREATE PROCEDURE to CREATE OR ALTER PROCEDURE", () => {
+    expect(toCreateOrAlter("CREATE PROCEDURE dbo.p AS SELECT 1")).toBe(
+      "CREATE OR ALTER PROCEDURE dbo.p AS SELECT 1",
+    );
+  });
+  it("handles the PROC abbreviation and case/space variance", () => {
+    expect(toCreateOrAlter("create   proc dbo.p as x")).toBe(
+      "CREATE OR ALTER PROCEDURE dbo.p as x",
+    );
+  });
+  it("is a no-op when already CREATE OR ALTER", () => {
+    expect(toCreateOrAlter("CREATE OR ALTER PROCEDURE dbo.p AS x")).toBe(
+      "CREATE OR ALTER PROCEDURE dbo.p AS x",
+    );
+  });
+  it("requires a word boundary: RECREATE PROCEDURE is not matched", () => {
+    expect(toCreateOrAlter("RECREATE PROCEDURE dbo.p AS x")).toBe(
+      "RECREATE PROCEDURE dbo.p AS x",
+    );
+  });
+  it("requires whitespace between CREATE and PROC", () => {
+    expect(toCreateOrAlter("CREATEPROCEDURE dbo.p")).toBe("CREATEPROCEDURE dbo.p");
+  });
+  it("only rewrites the first CREATE PROCEDURE", () => {
+    const s = "CREATE PROCEDURE dbo.a AS SELECT 'CREATE PROCEDURE dbo.b'";
+    expect(toCreateOrAlter(s)).toBe(
+      "CREATE OR ALTER PROCEDURE dbo.a AS SELECT 'CREATE PROCEDURE dbo.b'",
+    );
+  });
+  it("leaves source without a CREATE PROCEDURE unchanged", () => {
+    expect(toCreateOrAlter("SELECT 1;")).toBe("SELECT 1;");
+  });
+});
+
+describe("procFileBase", () => {
+  it("joins schema.name", () => {
+    expect(procFileBase("dbo", "p_demo")).toBe("dbo.p_demo");
+  });
+  it("strips brackets and collapses unsafe chars", () => {
+    expect(procFileBase("[my schema]", "[weird/name]")).toBe(
+      "my_schema.weird_name",
+    );
+  });
+  it("drops an empty schema", () => {
+    expect(procFileBase("", "p")).toBe("p");
+  });
+  it("falls back to 'procedure' for an empty name", () => {
+    expect(procFileBase("dbo", "")).toBe("dbo.procedure");
+  });
+  it("trims leading/trailing underscores produced by unsafe chars", () => {
+    // "/dbo/" → "_dbo_" → trimmed to "dbo"; "/p/" → "p"
+    expect(procFileBase("/dbo/", "/p/")).toBe("dbo.p");
+  });
+  it("trims a leading-only and a trailing-only underscore", () => {
+    // exercises each side of /^_+|_+$/ independently
+    expect(procFileBase("_dbo", "p_")).toBe("dbo.p");
+  });
+});
+
+describe("buildDeployNotebook", () => {
+  it("produces valid ipynb JSON with the DDL as CREATE OR ALTER", () => {
+    const nb = JSON.parse(
+      buildDeployNotebook("CREATE PROCEDURE dbo.p AS SELECT 1", "dbo.p"),
+    );
+    expect(nb.nbformat).toBe(4);
+    expect(nb.cells).toHaveLength(2);
+    expect(nb.cells[0].cell_type).toBe("markdown");
+    expect(nb.cells[1].cell_type).toBe("code");
+    // markdown mentions the procedure and that it is safe to re-run
+    const mdText = nb.cells[0].source.join("");
+    expect(mdText).toContain("Deploy");
+    expect(mdText).toContain("dbo.p");
+    expect(mdText).toContain("CREATE OR ALTER PROCEDURE");
+    // code cell: pip line, placeholders, DDL, connect, confirmation
+    const codeText = nb.cells[1].source.join("");
+    expect(codeText).toContain("%pip install tsql-fabric-debugger");
+    expect(codeText).toContain("from tsql_fabric_debugger import connect");
+    expect(codeText).toContain('SERVER = "<your warehouse SQL endpoint>"');
+    expect(codeText).toContain('DATABASE = "<your warehouse name>"');
+    expect(codeText).toContain("CREATE OR ALTER PROCEDURE dbo.p");
+    expect(codeText).toContain("connect(SERVER, DATABASE, autocommit=True)");
+    expect(codeText).toContain("conn.cursor().execute(DDL)");
+    expect(codeText).toContain('print("deployed: dbo.p")');
+    // python notebook metadata
+    expect(nb.metadata.language_info.name).toBe("python");
+    expect(nb.metadata.kernelspec.name).toBe("python3");
+    expect(nb.metadata.kernelspec.language).toBe("python");
+    expect(nb.nbformat_minor).toBe(5);
+    // nbformat source: every line keeps a trailing newline except the last
+    for (const cell of nb.cells) {
+      const src: string[] = cell.source;
+      expect(src.length).toBeGreaterThan(1);
+      src.forEach((l: string, i: number) => {
+        expect(l.endsWith("\n")).toBe(i < src.length - 1);
+      });
+    }
+  });
+  it("escapes a triple-quote in the SQL so the Python string stays valid", () => {
+    const nb = JSON.parse(
+      buildDeployNotebook('CREATE PROC dbo.p AS SELECT """x"""', "dbo.p"),
+    );
+    const codeText = nb.cells[1].source.join("");
+    expect(codeText).not.toContain('SELECT """x"""');
+    expect(codeText).toContain('\\"\\"\\"');
   });
 });
