@@ -874,7 +874,10 @@ async function openProcedureSource(item?: ProcNode): Promise<void> {
 // local → Fabric: generate deployable artifacts from a local .sql — a
 // CREATE OR ALTER procedure and a notebook that deploys it. Writes files only;
 // nothing runs against the warehouse.
-async function exportForFabric(uri?: vscode.Uri): Promise<void> {
+async function exportForFabric(arg?: vscode.Uri | FileNode): Promise<void> {
+  // Invoked from the Project Files item (a FileNode), the explorer (a Uri), or
+  // the Command Palette (nothing → the active editor).
+  const uri = arg instanceof vscode.Uri ? arg : arg?.resourceUri;
   const doc = uri
     ? await vscode.workspace.openTextDocument(uri)
     : vscode.window.activeTextEditor?.document;

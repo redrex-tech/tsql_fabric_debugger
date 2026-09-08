@@ -214,6 +214,11 @@
           "group": "inline"
         },
         {
+          "command": "tsqlFabric.exportForFabric",
+          "when": "view == tsqlFabricFiles && viewItem == sqlFile",
+          "group": "inline@2"
+        },
+        {
           "command": "tsqlFabric.debugProcedure",
           "when": "view == tsqlFabricProcedures && viewItem == procedure",
           "group": "inline"
@@ -227,13 +232,6 @@
           "command": "tsqlFabric.openInFabric",
           "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
           "group": "inline"
-        }
-      ],
-      "editor/title": [
-        {
-          "command": "tsqlFabric.exportForFabric",
-          "when": "resourceLangId == sql",
-          "group": "navigation"
         }
       ],
       "explorer/context": [

@@ -7,7 +7,8 @@
   into a local `.sql` (in `tsqlFabric.localFolder`, default `fabric/`) and opens
   it — set breakpoints and press F5 (`program` mode). Read-only fetch; nothing
   is written to the warehouse.
-- **Export for Fabric deploy**: on a `.sql`, generates deployable artifacts —
+- **Export for Fabric deploy**: an inline button on a `.sql` in the **Project
+  Files** view (or right-click in the explorer) generates deployable artifacts —
   `<name>.sql` normalized to `CREATE OR ALTER PROCEDURE` and a
   `<name>.Deploy.ipynb` notebook whose cell (re)creates the procedure in the
   warehouse. Writes files only; **the extension never runs anything against the
