@@ -332,62 +332,128 @@ export function notebookUrl(workspaceId: string, itemId: string): string {
   return `https://app.fabric.microsoft.com/groups/${workspaceId}/synapsenotebooks/${itemId}`;
 }
 
-// Download a notebook's .ipynb source from Fabric (getDefinition). Handles both
-// the synchronous (200) and long-running (202 + poll) shapes of the API.
+interface DefinitionPart {
+  path: string;
+  payload: string;
+  payloadType?: string;
+}
+interface FabricDefinition {
+  parts?: DefinitionPart[];
+}
+
+// Poll a long-running Fabric operation (202 + Location) to completion.
+async function pollOperation(
+  location: string,
+  headers: Record<string, string>,
+  signal?: AbortSignal,
+  what = "operation",
+): Promise<void> {
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (signal?.aborted) {
+      throw new Error("cancelled");
+    }
+    const op = await fetch(location, { headers, signal });
+    const status = ((await op.json()) as { status?: string }).status;
+    if (status === "Succeeded") {
+      return;
+    }
+    if (status === "Failed") {
+      throw new Error(`Fabric ${what} failed.`);
+    }
+  }
+  throw new Error(`Fabric ${what} timed out.`);
+}
+
+// The notebook's full definition (all parts) from Fabric getDefinition. Handles
+// the synchronous (200) and long-running (202 + poll) shapes.
+export async function getNotebookDefinition(
+  token: string,
+  workspaceId: string,
+  itemId: string,
+  signal?: AbortSignal,
+): Promise<FabricDefinition> {
+  const headers = { Authorization: `Bearer ${token}` };
+  const resp = await fetch(
+    `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/getDefinition?format=ipynb`,
+    { method: "POST", headers, signal },
+  );
+  if (resp.status === 200) {
+    return ((await resp.json()) as { definition?: FabricDefinition }).definition ?? {};
+  }
+  if (resp.status === 202) {
+    const location = resp.headers.get("Location");
+    if (!location) {
+      throw new Error("Fabric getDefinition: missing operation Location.");
+    }
+    await pollOperation(location, headers, signal, "getDefinition");
+    const res = await fetch(`${location}/result`, { headers, signal });
+    if (!res.ok) {
+      throw new Error(`Fabric getDefinition result: ${res.status}`);
+    }
+    return ((await res.json()) as { definition?: FabricDefinition }).definition ?? {};
+  }
+  throw new Error(
+    `Fabric getDefinition: ${resp.status} ${(await resp.text()).slice(0, 200)}`,
+  );
+}
+
+// Download a notebook's .ipynb source from Fabric.
 export async function getNotebookIpynb(
   token: string,
   workspaceId: string,
   itemId: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const headers = { Authorization: `Bearer ${token}` };
-  const resp = await fetch(
-    `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/getDefinition?format=ipynb`,
-    { method: "POST", headers, signal },
-  );
-
-  let result: {
-    definition?: { parts?: { path: string; payload: string }[] };
-  };
-  if (resp.status === 200) {
-    result = (await resp.json()) as typeof result;
-  } else if (resp.status === 202) {
-    const location = resp.headers.get("Location");
-    if (!location) {
-      throw new Error("Fabric getDefinition: missing operation Location.");
-    }
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 1500));
-      if (signal?.aborted) {
-        throw new Error("cancelled");
-      }
-      const op = await fetch(location, { headers, signal });
-      const status = ((await op.json()) as { status?: string }).status;
-      if (status === "Succeeded") {
-        break;
-      }
-      if (status === "Failed") {
-        throw new Error("Fabric getDefinition operation failed.");
-      }
-    }
-    const res = await fetch(`${location}/result`, { headers, signal });
-    if (!res.ok) {
-      throw new Error(`Fabric getDefinition result: ${res.status}`);
-    }
-    result = (await res.json()) as typeof result;
-  } else {
-    throw new Error(
-      `Fabric getDefinition: ${resp.status} ${(await resp.text()).slice(0, 200)}`,
-    );
-  }
-
-  const part = result.definition?.parts?.find((p) =>
-    p.path.endsWith(".ipynb"),
-  );
+  const def = await getNotebookDefinition(token, workspaceId, itemId, signal);
+  const part = def.parts?.find((p) => p.path.endsWith(".ipynb"));
   if (!part) {
     throw new Error("Fabric getDefinition: no .ipynb part in the response.");
   }
   return Buffer.from(part.payload, "base64").toString("utf8");
+}
+
+// Overwrite a Fabric notebook's content with the given .ipynb (updateDefinition).
+// Keeps the notebook's other definition parts (e.g. .platform) intact, replacing
+// only the .ipynb payload. This WRITES to Fabric.
+export async function updateNotebookDefinition(
+  token: string,
+  workspaceId: string,
+  itemId: string,
+  ipynb: string,
+): Promise<void> {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+  const def = await getNotebookDefinition(token, workspaceId, itemId);
+  const part = def.parts?.find((p) => p.path.endsWith(".ipynb"));
+  if (!part || !def.parts) {
+    throw new Error("Fabric updateDefinition: no .ipynb part to replace.");
+  }
+  part.payload = Buffer.from(ipynb, "utf8").toString("base64");
+  part.payloadType = "InlineBase64";
+  const resp = await fetch(
+    `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/updateDefinition`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ definition: { parts: def.parts } }),
+    },
+  );
+  if (resp.status === 200) {
+    return;
+  }
+  if (resp.status === 202) {
+    const location = resp.headers.get("Location");
+    if (location) {
+      await pollOperation(location, headers, undefined, "updateDefinition");
+    }
+    return;
+  }
+  throw new Error(
+    `Fabric updateDefinition: ${resp.status} ${(await resp.text()).slice(0, 200)}`,
+  );
 }
 
 // Find which workspace owns a warehouse with the given SQL endpoint. Lets the

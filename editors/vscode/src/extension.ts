@@ -17,6 +17,9 @@ import {
   parseProcName,
   artifactPath,
   buildDeployNotebook,
+  injectNotebookIdentity,
+  readNotebookIdentity,
+  stripNotebookIdentity,
   type ResultSet,
   type ResultSetPayload,
 } from "./util";
@@ -26,6 +29,7 @@ import {
   envWithToken,
   getDatabaseToken,
   getNotebookIpynb,
+  updateNotebookDefinition,
   getSteppableLines,
   fetchProcedureSource,
   killOrphanSessions,
@@ -138,6 +142,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "tsqlFabric.openNotebook",
       (item?: NotebookNode) => openNotebookInEditor(context, item?.notebook),
+    ),
+    vscode.commands.registerCommand(
+      "tsqlFabric.saveNotebookToProject",
+      saveNotebookToProject,
+    ),
+    vscode.commands.registerCommand(
+      "tsqlFabric.updateNotebookInFabric",
+      updateNotebookInFabric,
     ),
     // The inline button -> open in the Fabric web UI (to actually run it).
     vscode.commands.registerCommand(
@@ -805,6 +817,117 @@ async function openNotebookInEditor(
     if (uri) {
       await vscode.commands.executeCommand("vscode.open", uri);
     }
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// Fabric → local repo: download a notebook into the project's fabric/notebooks
+// folder, stamping its Fabric identity into the .ipynb metadata so it can later
+// be updated back. Read-only against Fabric.
+async function saveNotebookToProject(item?: NotebookNode): Promise<void> {
+  const nb = item?.notebook;
+  if (!nb) {
+    return;
+  }
+  const dir = localFabricDir();
+  if (!dir) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a folder/workspace first (the notebook is saved there).",
+    );
+    return;
+  }
+  try {
+    const file = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: saving "${nb.displayName}"…`,
+      },
+      async () => {
+        const token = await getToken();
+        const ipynb = await getNotebookIpynb(token, nb.workspaceId, nb.id);
+        const stamped = injectNotebookIdentity(ipynb, {
+          workspaceId: nb.workspaceId,
+          itemId: nb.id,
+          displayName: nb.displayName,
+        });
+        const safe = nb.displayName.replace(/[^\w.\- ]+/g, "_");
+        const target = vscode.Uri.joinPath(dir, "notebooks", `${safe}.ipynb`);
+        await vscode.workspace.fs.createDirectory(
+          vscode.Uri.joinPath(target, ".."),
+        );
+        await vscode.workspace.fs.writeFile(
+          target,
+          Buffer.from(stamped, "utf8"),
+        );
+        return target;
+      },
+    );
+    await vscode.commands.executeCommand("vscode.open", file);
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: "${nb.displayName}" saved to the project — edit it, then "Update in Fabric" to publish.`,
+    );
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// local → Fabric: overwrite the linked cloud notebook with the local .ipynb
+// (updateDefinition). Requires the Fabric identity stamped at download time,
+// and always asks for confirmation first (this replaces the cloud content).
+async function updateNotebookInFabric(
+  arg?: vscode.Uri | FileNode,
+): Promise<void> {
+  const uri =
+    arg instanceof vscode.Uri
+      ? arg
+      : (arg?.resourceUri ?? vscode.window.activeNotebookEditor?.notebook.uri);
+  if (!uri || !uri.fsPath.toLowerCase().endsWith(".ipynb")) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: select a local .ipynb to update in Fabric.",
+    );
+    return;
+  }
+  const ipynb = Buffer.from(
+    await vscode.workspace.fs.readFile(uri),
+  ).toString("utf8");
+  const id = readNotebookIdentity(ipynb);
+  if (!id) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: this .ipynb isn't linked to a Fabric notebook. Use “Save Notebook to Project” to download it first.",
+    );
+    return;
+  }
+  const label = id.displayName ?? uriBasename(uri);
+  const go = await vscode.window.showWarningMessage(
+    `⚠ Overwrite the Fabric notebook "${label}" with this local copy? This replaces its content in the cloud.`,
+    { modal: true },
+    "Update in Fabric",
+  );
+  if (go !== "Update in Fabric") {
+    return;
+  }
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: updating "${label}" in Fabric…`,
+      },
+      async () => {
+        const token = await getToken();
+        // send a clean copy (without our mapping metadata); the local file
+        // keeps its identity for future updates.
+        await updateNotebookDefinition(
+          token,
+          id.workspaceId,
+          id.itemId,
+          stripNotebookIdentity(ipynb),
+        );
+      },
+    );
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: "${label}" updated in Fabric.`,
+    );
   } catch (err) {
     reportError(err);
   }
