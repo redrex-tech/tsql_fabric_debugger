@@ -7,7 +7,9 @@ import {
   matchVariables,
   normalizePayload,
   parseIntrospectResult,
+  parseProcName,
   procFileBase,
+  artifactPath,
   toCreateOrAlter,
   toCsv,
   buildDeployNotebook,
@@ -349,5 +351,57 @@ describe("buildDeployNotebook", () => {
     const codeText = nb.cells[1].source.join("");
     expect(codeText).not.toContain('SELECT """x"""');
     expect(codeText).toContain('\\"\\"\\"');
+  });
+});
+
+describe("parseProcName", () => {
+  it("parses schema.name", () => {
+    expect(parseProcName("CREATE PROCEDURE sales.load_orders AS x")).toEqual({
+      schema: "sales",
+      name: "load_orders",
+    });
+  });
+  it("defaults schema to dbo when unqualified", () => {
+    expect(parseProcName("CREATE OR ALTER PROC p_demo AS x")).toEqual({
+      schema: "dbo",
+      name: "p_demo",
+    });
+  });
+  it("strips brackets and tolerates whitespace around the dot", () => {
+    expect(parseProcName("create   proc [my schema] . [weird] as x")).toEqual({
+      schema: "my schema",
+      name: "weird",
+    });
+  });
+  it("returns undefined without a CREATE PROCEDURE", () => {
+    expect(parseProcName("SELECT 1;")).toBeUndefined();
+  });
+});
+
+describe("artifactPath", () => {
+  it("schema-type: kind/schema/name (default)", () => {
+    expect(artifactPath("procedures", "sales", "load_orders", "schema-type")).toBe(
+      "procedures/sales/load_orders",
+    );
+    expect(artifactPath("deploy", "dbo", "p", "schema-type")).toBe("deploy/dbo/p");
+  });
+  it("schema: schema/name", () => {
+    expect(artifactPath("deploy", "dbo", "p", "schema")).toBe("dbo/p");
+  });
+  it("type: kind/schema.name", () => {
+    expect(artifactPath("procedures", "dbo", "p", "type")).toBe("procedures/dbo.p");
+  });
+  it("flat: schema.name", () => {
+    expect(artifactPath("deploy", "dbo", "p", "flat")).toBe("dbo.p");
+  });
+  it("falls back to the default layout for an unknown value", () => {
+    expect(artifactPath("procedures", "dbo", "p", "weird")).toBe(
+      "procedures/dbo/p",
+    );
+  });
+  it("sanitizes and defaults empty segments", () => {
+    expect(artifactPath("deploy", "[a/b]", "", "schema-type")).toBe(
+      "deploy/a_b/procedure",
+    );
   });
 });

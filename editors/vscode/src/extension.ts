@@ -14,7 +14,8 @@ import {
   normalizePayload,
   toCsv,
   toCreateOrAlter,
-  procFileBase,
+  parseProcName,
+  artifactPath,
   buildDeployNotebook,
   type ResultSet,
   type ResultSetPayload,
@@ -110,6 +111,7 @@ export function activate(context: vscode.ExtensionContext): void {
       openProcedureSource,
     ),
     vscode.commands.registerCommand("tsqlFabric.exportForFabric", exportForFabric),
+    vscode.commands.registerCommand("tsqlFabric.uploadToGit", uploadToGit),
     vscode.commands.registerCommand("tsqlFabric.openSettings", () => {
       void vscode.commands.executeCommand(
         "workbench.action.openSettings",
@@ -854,11 +856,15 @@ async function openProcedureSource(item?: ProcNode): Promise<void> {
           await fetchProcedureSource(resolvePython(), server, database, name),
         ),
     );
-    const file = vscode.Uri.joinPath(
-      dir,
-      `${procFileBase(item.proc.schema, item.proc.name)}.sql`,
+    const layout = cfg.get<string>("fileLayout", "schema-type");
+    const rel = artifactPath(
+      "procedures",
+      item.proc.schema,
+      item.proc.name,
+      layout,
     );
-    await vscode.workspace.fs.createDirectory(dir);
+    const file = vscode.Uri.joinPath(dir, `${rel}.sql`);
+    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(file, ".."));
     await vscode.workspace.fs.writeFile(file, Buffer.from(src, "utf8"));
     await vscode.window.showTextDocument(
       await vscode.workspace.openTextDocument(file),
@@ -895,28 +901,135 @@ async function exportForFabric(arg?: vscode.Uri | FileNode): Promise<void> {
     return;
   }
   const sql = doc.getText();
-  const base = (doc.fileName.split(/[\\/]/).pop() ?? "procedure").replace(
+  const fileBase = (doc.fileName.split(/[\\/]/).pop() ?? "procedure").replace(
     /\.sql$/i,
     "",
   );
+  // Prefer the schema.name from the CREATE statement; fall back to the filename.
+  const parsed = parseProcName(sql);
+  const schema = parsed?.schema ?? "dbo";
+  const name = parsed?.name ?? fileBase;
+  const label = parsed ? `${schema}.${name}` : fileBase;
+  const layout = vscode.workspace
+    .getConfiguration("tsqlFabric")
+    .get<string>("fileLayout", "schema-type");
+  const rel = artifactPath("deploy", schema, name, layout);
   try {
-    await vscode.workspace.fs.createDirectory(dir);
-    const sqlFile = vscode.Uri.joinPath(dir, `${base}.sql`);
-    const nbFile = vscode.Uri.joinPath(dir, `${base}.Deploy.ipynb`);
+    const sqlFile = vscode.Uri.joinPath(dir, `${rel}.sql`);
+    const nbFile = vscode.Uri.joinPath(dir, `${rel}.Deploy.ipynb`);
+    await vscode.workspace.fs.createDirectory(
+      vscode.Uri.joinPath(sqlFile, ".."),
+    );
     await vscode.workspace.fs.writeFile(
       sqlFile,
       Buffer.from(toCreateOrAlter(sql), "utf8"),
     );
     await vscode.workspace.fs.writeFile(
       nbFile,
-      Buffer.from(buildDeployNotebook(sql, base), "utf8"),
+      Buffer.from(buildDeployNotebook(sql, label), "utf8"),
     );
     void vscode.commands.executeCommand("revealInExplorer", nbFile);
     void vscode.window.showInformationMessage(
-      `T-SQL Fabric: exported ${base}.sql and ${base}.Deploy.ipynb — upload/run them in Fabric to deploy.`,
+      `T-SQL Fabric: exported ${label} (.sql + Deploy.ipynb) — upload/run them in Fabric to deploy.`,
     );
   } catch (err) {
     reportError(err);
+  }
+}
+
+// Minimal shape of the built-in Git extension API (vscode.git) we use.
+interface GitRef {
+  name?: string;
+  upstream?: unknown;
+}
+interface GitRepository {
+  rootUri: vscode.Uri;
+  state: { HEAD?: GitRef };
+  add(paths: string[]): Promise<void>;
+  commit(message: string): Promise<void>;
+  push(remote?: string, branch?: string, setUpstream?: boolean): Promise<void>;
+}
+interface GitAPI {
+  repositories: GitRepository[];
+  getRepository(uri: vscode.Uri): GitRepository | null;
+}
+
+async function gitApi(): Promise<GitAPI | undefined> {
+  const ext = vscode.extensions.getExtension<{ getAPI(v: 1): GitAPI }>(
+    "vscode.git",
+  );
+  if (!ext) {
+    return undefined;
+  }
+  if (!ext.isActive) {
+    await ext.activate();
+  }
+  return ext.exports.getAPI(1);
+}
+
+// Commit & push the local Fabric folder to the workspace's Git repository,
+// using the user's existing Git credentials (via the built-in Git extension).
+async function uploadToGit(): Promise<void> {
+  const ws = vscode.workspace.workspaceFolders?.[0];
+  const dir = localFabricDir();
+  if (!ws || !dir) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a folder/workspace first.",
+    );
+    return;
+  }
+  const api = await gitApi();
+  if (!api) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: the built-in Git extension is not available.",
+    );
+    return;
+  }
+  const repo = api.getRepository(ws.uri) ?? api.repositories[0];
+  if (!repo) {
+    void vscode.window.showWarningMessage(
+      "T-SQL Fabric: this folder is not a Git repository. Initialize one in the Source Control view, then try again.",
+    );
+    return;
+  }
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const remote = cfg.get<string>("gitRemote", "").trim();
+  const message = await vscode.window.showInputBox({
+    prompt: "T-SQL Fabric: commit message",
+    value: cfg.get<string>("gitCommitMessage", "Update Fabric artifacts"),
+    ignoreFocusOut: true,
+  });
+  if (!message) {
+    return; // cancelled
+  }
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "T-SQL Fabric: committing & pushing…",
+      },
+      async () => {
+        await repo.add([dir.fsPath]); // stage the fabric folder
+        await repo.commit(message);
+        const head = repo.state.HEAD;
+        if (head?.upstream) {
+          await repo.push(remote || undefined);
+        } else {
+          // no upstream yet — set it on first push
+          await repo.push(remote || "origin", head?.name, true);
+        }
+      },
+    );
+    void vscode.window.showInformationMessage(
+      "T-SQL Fabric: committed and pushed to Git.",
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    void vscode.window.showErrorMessage(
+      /nothing to commit|no changes|clean/i.test(msg)
+        ? "T-SQL Fabric: nothing new to commit in the Fabric folder."
+        : `T-SQL Fabric: Git upload failed — ${msg}`,
+    );
   }
 }
 
