@@ -9,6 +9,9 @@ import {
   parseIntrospectResult,
   parseProcName,
   procFileBase,
+  injectNotebookIdentity,
+  readNotebookIdentity,
+  stripNotebookIdentity,
   artifactPath,
   toCreateOrAlter,
   toCsv,
@@ -403,5 +406,49 @@ describe("artifactPath", () => {
     expect(artifactPath("deploy", "[a/b]", "", "schema-type")).toBe(
       "deploy/a_b/procedure",
     );
+  });
+});
+
+describe("notebook identity", () => {
+  const base = JSON.stringify({ cells: [], metadata: { language_info: { name: "python" } }, nbformat: 4 });
+
+  it("injects workspaceId/itemId into metadata", () => {
+    const out = injectNotebookIdentity(base, {
+      workspaceId: "ws1",
+      itemId: "it1",
+      displayName: "nb_x",
+    });
+    const nb = JSON.parse(out);
+    expect(nb.metadata.tsqlFabric).toEqual({
+      workspaceId: "ws1",
+      itemId: "it1",
+      displayName: "nb_x",
+    });
+    // preserves existing metadata
+    expect(nb.metadata.language_info.name).toBe("python");
+  });
+
+  it("reads back the identity", () => {
+    const out = injectNotebookIdentity(base, { workspaceId: "ws1", itemId: "it1" });
+    expect(readNotebookIdentity(out)).toEqual({
+      workspaceId: "ws1",
+      itemId: "it1",
+      displayName: undefined,
+    });
+  });
+
+  it("returns undefined when there is no identity or not JSON", () => {
+    expect(readNotebookIdentity(base)).toBeUndefined();
+    expect(readNotebookIdentity("not json")).toBeUndefined();
+    expect(
+      readNotebookIdentity(JSON.stringify({ metadata: { tsqlFabric: { workspaceId: "w" } } })),
+    ).toBeUndefined(); // missing itemId
+  });
+
+  it("strips the identity for a clean upload, keeping other metadata", () => {
+    const stamped = injectNotebookIdentity(base, { workspaceId: "ws1", itemId: "it1" });
+    const clean = JSON.parse(stripNotebookIdentity(stamped));
+    expect(clean.metadata.tsqlFabric).toBeUndefined();
+    expect(clean.metadata.language_info.name).toBe("python");
   });
 });

@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -144,6 +144,16 @@
         "icon": "$(link-external)"
       },
       {
+        "command": "tsqlFabric.saveNotebookToProject",
+        "title": "T-SQL Fabric: Save Notebook to Project (local copy)",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "tsqlFabric.updateNotebookInFabric",
+        "title": "T-SQL Fabric: Update Notebook in Fabric (overwrite cloud)",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "tsqlFabric.debugFile",
         "title": "T-SQL Fabric: Debug this procedure",
         "icon": "$(debug-alt)"
@@ -239,8 +249,18 @@
           "group": "inline@2"
         },
         {
+          "command": "tsqlFabric.saveNotebookToProject",
+          "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
+          "group": "inline@1"
+        },
+        {
           "command": "tsqlFabric.openInFabric",
           "when": "view == tsqlFabricWorkspace && viewItem == fabricNotebook",
+          "group": "inline@2"
+        },
+        {
+          "command": "tsqlFabric.updateNotebookInFabric",
+          "when": "view == tsqlFabricFiles && viewItem == notebookFile",
           "group": "inline"
         }
       ],
