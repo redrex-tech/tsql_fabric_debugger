@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.6 — preview
+
+- **Notebook round-trip**:
+  - **Save Notebook to Project** (inline button on a notebook in the Fabric
+    Workspace view) downloads its `.ipynb` into `fabric/notebooks/`, stamping the
+    Fabric identity (workspace/item id) into the notebook metadata so it can be
+    updated back later — survives renames/moves.
+  - **Update Notebook in Fabric** (inline button on a local `.ipynb` in Project
+    Files) overwrites the linked cloud notebook with the local copy
+    (`updateDefinition`), after a **modal confirmation**. Only the `.ipynb` part
+    is replaced (other definition parts are preserved); the pushed copy is
+    cleaned of the mapping metadata.
+
+
 ## 0.3.5 — preview
 
 - **Settings organized into sections**: *Connection*, *Debugging*, and

@@ -296,3 +296,60 @@ export function buildDeployNotebook(sqlText: string, procLabel: string): string 
   };
   return JSON.stringify(nb, null, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Notebook round-trip: bind a local .ipynb to its Fabric item by stamping the
+// identity into the notebook metadata (chosen over filename/sidecar so it
+// survives renames/moves). Pure JSON transforms.
+// ---------------------------------------------------------------------------
+export interface NotebookIdentity {
+  workspaceId: string;
+  itemId: string;
+  displayName?: string;
+}
+
+export function injectNotebookIdentity(
+  ipynb: string,
+  id: NotebookIdentity,
+): string {
+  const nb = JSON.parse(ipynb) as { metadata?: Record<string, unknown> };
+  nb.metadata = nb.metadata ?? {};
+  nb.metadata.tsqlFabric = {
+    workspaceId: id.workspaceId,
+    itemId: id.itemId,
+    displayName: id.displayName,
+  };
+  return JSON.stringify(nb, null, 1);
+}
+
+export function readNotebookIdentity(
+  ipynb: string,
+): NotebookIdentity | undefined {
+  try {
+    const m = (
+      JSON.parse(ipynb) as {
+        metadata?: { tsqlFabric?: Partial<NotebookIdentity> };
+      }
+    ).metadata?.tsqlFabric;
+    if (m && typeof m.workspaceId === "string" && typeof m.itemId === "string") {
+      return {
+        workspaceId: m.workspaceId,
+        itemId: m.itemId,
+        displayName: m.displayName,
+      };
+    }
+  } catch {
+    /* not JSON / not ours */
+  }
+  return undefined;
+}
+
+// Remove our identity metadata, so the copy pushed to Fabric stays clean (the
+// local file keeps it for future updates).
+export function stripNotebookIdentity(ipynb: string): string {
+  const nb = JSON.parse(ipynb) as { metadata?: Record<string, unknown> };
+  if (nb.metadata) {
+    delete nb.metadata.tsqlFabric;
+  }
+  return JSON.stringify(nb, null, 1);
+}
