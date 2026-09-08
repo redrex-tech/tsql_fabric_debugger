@@ -163,3 +163,90 @@ export function toCsv(set: ResultSet): string {
   }
   return lines.join("\r\n");
 }
+
+// ---------------------------------------------------------------------------
+// Fabric round-trip: normalize a procedure for redeploy, and generate a
+// deploy notebook. Pure (vscode-free) so it's unit/mutation-tested.
+// ---------------------------------------------------------------------------
+
+// Normalize the first `CREATE [OR ALTER] PROC[EDURE]` to a canonical
+// `CREATE OR ALTER PROCEDURE`, so the exported script is idempotent to redeploy.
+// Source with no CREATE PROCEDURE is returned unchanged.
+export function toCreateOrAlter(sql: string): string {
+  return sql.replace(
+    /\bCREATE\s+(?:OR\s+ALTER\s+)?PROC(?:EDURE)?\b/i,
+    "CREATE OR ALTER PROCEDURE",
+  );
+}
+
+// A safe file base for a procedure: "schema.name" with unsafe chars collapsed
+// to "_". Brackets are stripped; an empty schema yields just the name.
+export function procFileBase(schema: string, name: string): string {
+  const clean = (s: string) =>
+    s
+      .replace(/[[\]]/g, "")
+      .replace(/[^\w.-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  const s = clean(schema);
+  const n = clean(name) || "procedure";
+  return s ? `${s}.${n}` : n;
+}
+
+function nbSource(lines: string[]): string[] {
+  // nbformat: each line keeps its trailing newline except the last
+  return lines.map((l, i) => (i < lines.length - 1 ? l + "\n" : l));
+}
+
+// Build a Fabric (Python) notebook whose code cell (re)creates the procedure
+// in the warehouse — a CREATE OR ALTER, safe to re-run. The T-SQL is kept
+// visible in the cell as a triple-quoted string; the user fills SERVER/DATABASE
+// and runs it in Fabric. Returns the .ipynb JSON.
+export function buildDeployNotebook(sqlText: string, procLabel: string): string {
+  const ddl = toCreateOrAlter(sqlText)
+    .replace(/\\/g, "\\\\")
+    .replace(/"""/g, '\\"\\"\\"');
+  const md = [
+    `# Deploy \`${procLabel}\``,
+    "",
+    "Run this notebook in Microsoft Fabric to (re)create the procedure in the",
+    "warehouse. It runs a `CREATE OR ALTER PROCEDURE`, so it is safe to re-run.",
+  ];
+  const code = [
+    "# %pip install tsql-fabric-debugger   # uncomment on the first run",
+    "from tsql_fabric_debugger import connect",
+    "",
+    'SERVER = "<your warehouse SQL endpoint>"',
+    'DATABASE = "<your warehouse name>"',
+    "",
+    'DDL = """',
+    ...ddl.split("\n"),
+    '"""',
+    "",
+    "conn = connect(SERVER, DATABASE, autocommit=True)",
+    "conn.cursor().execute(DDL)",
+    `print("deployed: ${procLabel}")`,
+  ];
+  const nb = {
+    cells: [
+      { cell_type: "markdown", metadata: {}, source: nbSource(md) },
+      {
+        cell_type: "code",
+        metadata: {},
+        execution_count: null,
+        outputs: [],
+        source: nbSource(code),
+      },
+    ],
+    metadata: {
+      language_info: { name: "python" },
+      kernelspec: {
+        display_name: "Python 3",
+        language: "python",
+        name: "python3",
+      },
+    },
+    nbformat: 4,
+    nbformat_minor: 5,
+  };
+  return JSON.stringify(nb, null, 1);
+}

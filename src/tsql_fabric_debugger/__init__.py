@@ -23,7 +23,7 @@ from .connection import connect, fetch_source, kill_orphan_sessions
 from .engine import TSQLDebugger
 from .runner import diff_logs, run_procedure, run_script, summarize
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 __all__ = ["TSQLDebugger", "connect", "fetch_source", "kill_orphan_sessions", "list_procedures", "diff_logs", "run_procedure", "run_script", "summarize", "__version__"]
 
 

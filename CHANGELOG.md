@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.3 — 2026-09-08
+
+- **`steppable-lines` (introspection)**: `python -m tsql_fabric_debugger.introspect steppable-lines`
+  (or `steppable_lines(sql_text)`) returns, offline, the 1-based line numbers a
+  breakpoint can actually pause on for a procedure — every statement start,
+  **including statements nested inside IF/ELSE/WHILE blocks and CATCH handlers**
+  (the parser is walked recursively). No server, token or connection. Tooling
+  uses it to show where breakpoints bind.
+- **`fetch-source` (introspection)**: `... introspect fetch-source --proc schema.name`
+  returns `{"source": ...}` — a deployed procedure's `OBJECT_DEFINITION`, so
+  tooling can open it as a local `.sql` for breakpoint debugging. Read-only.
+
+
 ## 0.3.2 — 2026-09-07
 
 - **Result sets grouped per step**: the `tsqlFabricResultSet` DAP event now

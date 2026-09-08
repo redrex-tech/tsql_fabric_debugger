@@ -1308,3 +1308,65 @@ def test_access_token_env_skips_az(monkeypatch):
     monkeypatch.setenv("FABRIC_TSQL_ACCESS_TOKEN", "a-ready-token")
     assert conn_mod._get_token() == "a-ready-token"
     monkeypatch.delenv("FABRIC_TSQL_ACCESS_TOKEN")
+
+
+def test_steppable_lines_offline_parse():
+    """steppable_lines() returns statement lines with no connection."""
+    from tsql_fabric_debugger.introspect import steppable_lines
+    sql = ("CREATE PROCEDURE dbo.p AS\n"   # 1 header (not steppable)
+           "BEGIN\n"                        # 2 BEGIN (not steppable)
+           "    DECLARE @i INT = 0;\n"      # 3 statement
+           "    SET @i = @i + 1;\n"         # 4 statement
+           "END;\n")                        # 5 END (not steppable)
+    assert steppable_lines(sql) == [3, 4]
+
+
+def test_steppable_lines_includes_nested_block_statements():
+    """Statements inside IF/ELSE/WHILE/CATCH are breakpoint-able and returned."""
+    from tsql_fabric_debugger.introspect import steppable_lines
+    sql = (
+        "CREATE PROCEDURE dbo.p @n INT AS\n"   # 1
+        "BEGIN\n"                              # 2
+        "    BEGIN TRY\n"                       # 3
+        "        IF @n > 0\n"                   # 4  block header
+        "        BEGIN\n"                       # 5
+        "            SET @n = @n + 1;\n"        # 6  nested (IF body)
+        "        END\n"                         # 7
+        "        ELSE\n"                        # 8
+        "            SET @n = -1;\n"            # 9  nested (ELSE body)
+        "        WHILE @n < 3\n"                # 10 block header
+        "            SET @n = @n + 1;\n"        # 11 nested (WHILE body)
+        "    END TRY\n"                         # 12
+        "    BEGIN CATCH\n"                     # 13
+        "        SET @n = -99;\n"               # 14 nested (CATCH body)
+        "    END CATCH\n"                       # 15
+        "END;\n")                               # 16
+    # headers 4 & 10, plus the nested bodies 6, 9, 11 and the CATCH body 14
+    assert steppable_lines(sql) == [4, 6, 9, 10, 11, 14]
+
+
+def test_fetch_source_offline(fake_session):
+    """fetch-source returns a deployed procedure's OBJECT_DEFINITION."""
+    from tsql_fabric_debugger.connection import fetch_source
+    fake_session.object_defs["DBO.P"] = (
+        "CREATE PROCEDURE dbo.p AS BEGIN SELECT 1; END;")
+    assert "CREATE PROCEDURE dbo.p" in fetch_source("dbo.p", "s", "d")
+
+
+def test_fetch_source_cli_requires_proc():
+    """The fetch-source CLI verb errors (JSON) without --proc."""
+    from tsql_fabric_debugger.introspect import main
+    import io
+    import contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = main(["fetch-source", "--server", "s", "--database", "d"])
+    assert rc == 1 and "error" in out.getvalue()
+
+
+def test_steppable_lines_rejects_loose_script():
+    """A non-procedure script raises (the CLI turns this into {"error": ...})."""
+    from tsql_fabric_debugger.introspect import steppable_lines
+    import pytest
+    with pytest.raises(Exception):
+        steppable_lines("SELECT 1;")
