@@ -298,9 +298,10 @@ export function buildDeployNotebook(sqlText: string, procLabel: string): string 
 }
 
 // ---------------------------------------------------------------------------
-// Notebook round-trip: bind a local .ipynb to its Fabric item by stamping the
-// identity into the notebook metadata (chosen over filename/sidecar so it
-// survives renames/moves). Pure JSON transforms.
+// Notebook round-trip: bind a local Fabric notebook source (.py — the format
+// Fabric's updateDefinition accepts) to its cloud item with a link comment on
+// the first line, so an update knows which item to overwrite (survives
+// renames/moves). Pure text transforms.
 // ---------------------------------------------------------------------------
 export interface NotebookIdentity {
   workspaceId: string;
@@ -308,48 +309,40 @@ export interface NotebookIdentity {
   displayName?: string;
 }
 
-export function injectNotebookIdentity(
-  ipynb: string,
-  id: NotebookIdentity,
-): string {
-  const nb = JSON.parse(ipynb) as { metadata?: Record<string, unknown> };
-  nb.metadata = nb.metadata ?? {};
-  nb.metadata.tsqlFabric = {
+const LINK_RE = /^# tsqlFabric-link: (.+)$/m;
+
+// Prepend the link comment (replacing any existing one) as the first line.
+export function stampNotebookLink(py: string, id: NotebookIdentity): string {
+  const json = JSON.stringify({
     workspaceId: id.workspaceId,
     itemId: id.itemId,
     displayName: id.displayName,
-  };
-  return JSON.stringify(nb, null, 1);
+  });
+  return `# tsqlFabric-link: ${json}\n${stripNotebookLink(py)}`;
 }
 
-export function readNotebookIdentity(
-  ipynb: string,
-): NotebookIdentity | undefined {
+export function readNotebookLink(py: string): NotebookIdentity | undefined {
+  const m = py.match(LINK_RE);
+  if (!m) {
+    return undefined;
+  }
   try {
-    const m = (
-      JSON.parse(ipynb) as {
-        metadata?: { tsqlFabric?: Partial<NotebookIdentity> };
-      }
-    ).metadata?.tsqlFabric;
-    if (m && typeof m.workspaceId === "string" && typeof m.itemId === "string") {
+    const o = JSON.parse(m[1]) as Partial<NotebookIdentity>;
+    if (typeof o.workspaceId === "string" && typeof o.itemId === "string") {
       return {
-        workspaceId: m.workspaceId,
-        itemId: m.itemId,
-        displayName: m.displayName,
+        workspaceId: o.workspaceId,
+        itemId: o.itemId,
+        displayName: o.displayName,
       };
     }
   } catch {
-    /* not JSON / not ours */
+    /* malformed link */
   }
   return undefined;
 }
 
-// Remove our identity metadata, so the copy pushed to Fabric stays clean (the
-// local file keeps it for future updates).
-export function stripNotebookIdentity(ipynb: string): string {
-  const nb = JSON.parse(ipynb) as { metadata?: Record<string, unknown> };
-  if (nb.metadata) {
-    delete nb.metadata.tsqlFabric;
-  }
-  return JSON.stringify(nb, null, 1);
+// Remove the link comment (and the newline it added), so the copy pushed to
+// Fabric is exactly the native source (the local file keeps the link).
+export function stripNotebookLink(py: string): string {
+  return py.replace(/^# tsqlFabric-link: .+\r?\n?/m, "");
 }

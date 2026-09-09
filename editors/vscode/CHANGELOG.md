@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.7 — preview
+
+- **Notebook round-trip fixed to Fabric's native format**: Fabric's
+  `updateDefinition` only accepts the native `notebook-content.py` source, not
+  `.ipynb` (verified against a live warehouse). So **Save Notebook to Project**
+  now downloads the notebook as a git-friendly `.py` (into `fabric/notebooks/`,
+  with a link comment on the first line), and **Update Notebook in Fabric**
+  pushes that `.py` back (native `updateDefinition`) after a modal confirmation.
+  The `.ipynb` "open notebook" action stays for read-only viewing.
+  Project Files now has a **Fabric notebooks (.py)** group with the update
+  button.
+
+
 ## 0.3.6 — preview
 
 - **Notebook round-trip**:

@@ -17,9 +17,9 @@ import {
   parseProcName,
   artifactPath,
   buildDeployNotebook,
-  injectNotebookIdentity,
-  readNotebookIdentity,
-  stripNotebookIdentity,
+  stampNotebookLink,
+  readNotebookLink,
+  stripNotebookLink,
   type ResultSet,
   type ResultSetPayload,
 } from "./util";
@@ -29,7 +29,8 @@ import {
   envWithToken,
   getDatabaseToken,
   getNotebookIpynb,
-  updateNotebookDefinition,
+  getNotebookSource,
+  updateNotebookSource,
   getSteppableLines,
   fetchProcedureSource,
   killOrphanSessions,
@@ -202,7 +203,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,ipynb}");
+  const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,ipynb,py}");
   watcher.onDidCreate(() => filesProvider.refresh());
   watcher.onDidDelete(() => filesProvider.refresh());
   context.subscriptions.push(watcher);
@@ -822,9 +823,10 @@ async function openNotebookInEditor(
   }
 }
 
-// Fabric → local repo: download a notebook into the project's fabric/notebooks
-// folder, stamping its Fabric identity into the .ipynb metadata so it can later
-// be updated back. Read-only against Fabric.
+// Fabric → local repo: download a notebook's NATIVE source (.py) into the
+// project's fabric/notebooks folder, stamping a link comment so it can later be
+// updated back. The .py format is what Fabric accepts on write (it round-trips)
+// and is git-friendly. Read-only against Fabric.
 async function saveNotebookToProject(item?: NotebookNode): Promise<void> {
   const nb = item?.notebook;
   if (!nb) {
@@ -845,14 +847,14 @@ async function saveNotebookToProject(item?: NotebookNode): Promise<void> {
       },
       async () => {
         const token = await getToken();
-        const ipynb = await getNotebookIpynb(token, nb.workspaceId, nb.id);
-        const stamped = injectNotebookIdentity(ipynb, {
+        const py = await getNotebookSource(token, nb.workspaceId, nb.id);
+        const stamped = stampNotebookLink(py, {
           workspaceId: nb.workspaceId,
           itemId: nb.id,
           displayName: nb.displayName,
         });
         const safe = nb.displayName.replace(/[^\w.\- ]+/g, "_");
-        const target = vscode.Uri.joinPath(dir, "notebooks", `${safe}.ipynb`);
+        const target = vscode.Uri.joinPath(dir, "notebooks", `${safe}.py`);
         await vscode.workspace.fs.createDirectory(
           vscode.Uri.joinPath(target, ".."),
         );
@@ -863,7 +865,9 @@ async function saveNotebookToProject(item?: NotebookNode): Promise<void> {
         return target;
       },
     );
-    await vscode.commands.executeCommand("vscode.open", file);
+    await vscode.window.showTextDocument(
+      await vscode.workspace.openTextDocument(file),
+    );
     void vscode.window.showInformationMessage(
       `T-SQL Fabric: "${nb.displayName}" saved to the project — edit it, then "Update in Fabric" to publish.`,
     );
@@ -872,8 +876,8 @@ async function saveNotebookToProject(item?: NotebookNode): Promise<void> {
   }
 }
 
-// local → Fabric: overwrite the linked cloud notebook with the local .ipynb
-// (updateDefinition). Requires the Fabric identity stamped at download time,
+// local → Fabric: overwrite the linked cloud notebook with the local .py source
+// (updateDefinition, native format). Requires the link stamped at download time,
 // and always asks for confirmation first (this replaces the cloud content).
 async function updateNotebookInFabric(
   arg?: vscode.Uri | FileNode,
@@ -881,20 +885,20 @@ async function updateNotebookInFabric(
   const uri =
     arg instanceof vscode.Uri
       ? arg
-      : (arg?.resourceUri ?? vscode.window.activeNotebookEditor?.notebook.uri);
-  if (!uri || !uri.fsPath.toLowerCase().endsWith(".ipynb")) {
+      : (arg?.resourceUri ?? vscode.window.activeTextEditor?.document.uri);
+  if (!uri || !uri.fsPath.toLowerCase().endsWith(".py")) {
     void vscode.window.showErrorMessage(
-      "T-SQL Fabric: select a local .ipynb to update in Fabric.",
+      "T-SQL Fabric: select a local Fabric notebook source (.py) to update.",
     );
     return;
   }
-  const ipynb = Buffer.from(
-    await vscode.workspace.fs.readFile(uri),
-  ).toString("utf8");
-  const id = readNotebookIdentity(ipynb);
+  const py = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString(
+    "utf8",
+  );
+  const id = readNotebookLink(py);
   if (!id) {
     void vscode.window.showErrorMessage(
-      "T-SQL Fabric: this .ipynb isn't linked to a Fabric notebook. Use “Save Notebook to Project” to download it first.",
+      "T-SQL Fabric: this file isn't linked to a Fabric notebook. Use “Save Notebook to Project” to download it first.",
     );
     return;
   }
@@ -915,13 +919,13 @@ async function updateNotebookInFabric(
       },
       async () => {
         const token = await getToken();
-        // send a clean copy (without our mapping metadata); the local file
-        // keeps its identity for future updates.
-        await updateNotebookDefinition(
+        // send the pristine native source (without our link comment); the local
+        // file keeps the link for future updates.
+        await updateNotebookSource(
           token,
           id.workspaceId,
           id.itemId,
-          stripNotebookIdentity(ipynb),
+          stripNotebookLink(py),
         );
       },
     );
@@ -1563,12 +1567,14 @@ function uriBasename(uri: vscode.Uri): string {
   return parts[parts.length - 1];
 }
 
+type FileKind = "sql" | "notebook" | "fabricpy";
+
 class FileNode extends vscode.TreeItem {
   constructor(
     label: string,
     collapsibleState: vscode.TreeItemCollapsibleState,
     public readonly resourceUri?: vscode.Uri,
-    kind?: "sql" | "notebook",
+    kind?: FileKind,
   ) {
     super(label, collapsibleState);
     if (resourceUri) {
@@ -1582,7 +1588,12 @@ class FileNode extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon(
         kind === "sql" ? "database" : "notebook",
       );
-      this.contextValue = kind === "sql" ? "sqlFile" : "notebookFile";
+      this.contextValue =
+        kind === "sql"
+          ? "sqlFile"
+          : kind === "fabricpy"
+            ? "fabricNotebookPy"
+            : "notebookFile";
     } else {
       this.iconPath = new vscode.ThemeIcon("folder");
       this.contextValue = "group";
@@ -1602,30 +1613,39 @@ class ProjectFilesProvider implements vscode.TreeDataProvider<FileNode> {
   }
   async getChildren(element?: FileNode): Promise<FileNode[]> {
     if (element) {
-      const kind = element.label === "Procedures (.sql)" ? "sql" : "notebook";
+      const kind: FileKind =
+        element.label === "Procedures (.sql)"
+          ? "sql"
+          : element.label === "Fabric notebooks (.py)"
+            ? "fabricpy"
+            : "notebook";
       return this.files(kind);
     }
     const groups: FileNode[] = [];
-    if ((await this.files("sql")).length > 0) {
-      groups.push(
-        new FileNode(
-          "Procedures (.sql)",
-          vscode.TreeItemCollapsibleState.Expanded,
-        ),
-      );
-    }
-    if ((await this.files("notebook")).length > 0) {
-      groups.push(
-        new FileNode(
-          "Notebooks (.ipynb)",
-          vscode.TreeItemCollapsibleState.Expanded,
-        ),
-      );
+    const labels: Record<FileKind, string> = {
+      sql: "Procedures (.sql)",
+      notebook: "Notebooks (.ipynb)",
+      fabricpy: "Fabric notebooks (.py)",
+    };
+    for (const kind of ["sql", "notebook", "fabricpy"] as FileKind[]) {
+      if ((await this.files(kind)).length > 0) {
+        groups.push(
+          new FileNode(labels[kind], vscode.TreeItemCollapsibleState.Expanded),
+        );
+      }
     }
     return groups;
   }
-  private async files(kind: "sql" | "notebook"): Promise<FileNode[]> {
-    const glob = kind === "sql" ? "**/*.sql" : "**/*.ipynb";
+  private async files(kind: FileKind): Promise<FileNode[]> {
+    const localFolder = vscode.workspace
+      .getConfiguration("tsqlFabric")
+      .get<string>("localFolder", "fabric");
+    const glob =
+      kind === "sql"
+        ? "**/*.sql"
+        : kind === "fabricpy"
+          ? `${localFolder}/notebooks/**/*.py`
+          : "**/*.ipynb";
     const uris = await vscode.workspace.findFiles(
       glob,
       "**/{node_modules,.venv,.git,dist,__pycache__}/**",

@@ -9,9 +9,9 @@ import {
   parseIntrospectResult,
   parseProcName,
   procFileBase,
-  injectNotebookIdentity,
-  readNotebookIdentity,
-  stripNotebookIdentity,
+  stampNotebookLink,
+  readNotebookLink,
+  stripNotebookLink,
   artifactPath,
   toCreateOrAlter,
   toCsv,
@@ -409,46 +409,44 @@ describe("artifactPath", () => {
   });
 });
 
-describe("notebook identity", () => {
-  const base = JSON.stringify({ cells: [], metadata: { language_info: { name: "python" } }, nbformat: 4 });
+describe("notebook link (.py round-trip)", () => {
+  const py = "# Fabric notebook source\n\n# CELL ****\n\nprint(1)\n";
 
-  it("injects workspaceId/itemId into metadata", () => {
-    const out = injectNotebookIdentity(base, {
-      workspaceId: "ws1",
-      itemId: "it1",
-      displayName: "nb_x",
-    });
-    const nb = JSON.parse(out);
-    expect(nb.metadata.tsqlFabric).toEqual({
-      workspaceId: "ws1",
-      itemId: "it1",
-      displayName: "nb_x",
-    });
-    // preserves existing metadata
-    expect(nb.metadata.language_info.name).toBe("python");
+  it("stamps the link on the first line, keeping the source", () => {
+    const out = stampNotebookLink(py, { workspaceId: "ws1", itemId: "it1", displayName: "nb_x" });
+    expect(out.split("\n")[0]).toBe(
+      '# tsqlFabric-link: {"workspaceId":"ws1","itemId":"it1","displayName":"nb_x"}',
+    );
+    expect(out).toContain("# Fabric notebook source");
+    expect(out).toContain("print(1)");
   });
 
-  it("reads back the identity", () => {
-    const out = injectNotebookIdentity(base, { workspaceId: "ws1", itemId: "it1" });
-    expect(readNotebookIdentity(out)).toEqual({
+  it("reads the link back", () => {
+    const out = stampNotebookLink(py, { workspaceId: "ws1", itemId: "it1" });
+    expect(readNotebookLink(out)).toEqual({
       workspaceId: "ws1",
       itemId: "it1",
       displayName: undefined,
     });
   });
 
-  it("returns undefined when there is no identity or not JSON", () => {
-    expect(readNotebookIdentity(base)).toBeUndefined();
-    expect(readNotebookIdentity("not json")).toBeUndefined();
+  it("returns undefined when there is no link or it is malformed", () => {
+    expect(readNotebookLink(py)).toBeUndefined();
+    expect(readNotebookLink("# tsqlFabric-link: not json")).toBeUndefined();
     expect(
-      readNotebookIdentity(JSON.stringify({ metadata: { tsqlFabric: { workspaceId: "w" } } })),
+      readNotebookLink('# tsqlFabric-link: {"workspaceId":"w"}'),
     ).toBeUndefined(); // missing itemId
   });
 
-  it("strips the identity for a clean upload, keeping other metadata", () => {
-    const stamped = injectNotebookIdentity(base, { workspaceId: "ws1", itemId: "it1" });
-    const clean = JSON.parse(stripNotebookIdentity(stamped));
-    expect(clean.metadata.tsqlFabric).toBeUndefined();
-    expect(clean.metadata.language_info.name).toBe("python");
+  it("strips the link so the pushed copy is the pristine source", () => {
+    const stamped = stampNotebookLink(py, { workspaceId: "ws1", itemId: "it1" });
+    expect(stripNotebookLink(stamped)).toBe(py);
+  });
+
+  it("re-stamping replaces the existing link (no duplicates)", () => {
+    const once = stampNotebookLink(py, { workspaceId: "a", itemId: "b" });
+    const twice = stampNotebookLink(once, { workspaceId: "c", itemId: "d" });
+    expect(twice.match(/tsqlFabric-link/g)).toHaveLength(1);
+    expect(readNotebookLink(twice)).toEqual({ workspaceId: "c", itemId: "d", displayName: undefined });
   });
 });
