@@ -1,8 +1,8 @@
 {
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
-  "description": "Step through T-SQL stored procedures on the Microsoft Fabric Warehouse from the editor — breakpoints, variables, step in/out — with ROLLBACK at the end. No scripting.",
-  "version": "0.3.7",
+  "description": "Debug T-SQL (Transact-SQL) stored procedures on the Microsoft Fabric Warehouse: breakpoints, step over/into/out, watch variables and a result-set grid — with ROLLBACK. Pull, edit and deploy procedures and notebooks.",
+  "version": "0.3.8",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -22,11 +22,34 @@
     "Debuggers"
   ],
   "keywords": [
+    "t-sql",
+    "transact-sql",
     "tsql",
-    "fabric",
-    "warehouse",
+    "sql",
+    "mssql",
     "sql-server",
-    "debugger"
+    "sql server",
+    "fabric",
+    "microsoft fabric",
+    "fabric warehouse",
+    "warehouse",
+    "data warehouse",
+    "synapse",
+    "azure",
+    "lakehouse",
+    "debugger",
+    "debug",
+    "debugging",
+    "breakpoint",
+    "breakpoints",
+    "step debugging",
+    "stored procedure",
+    "procedure",
+    "sproc",
+    "notebook",
+    "data engineering",
+    "etl",
+    "dap"
   ],
   "activationEvents": [
     "onLanguage:sql",
