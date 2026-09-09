@@ -371,11 +371,13 @@ export async function getNotebookDefinition(
   token: string,
   workspaceId: string,
   itemId: string,
+  format: "ipynb" | "" = "ipynb",
   signal?: AbortSignal,
 ): Promise<FabricDefinition> {
   const headers = { Authorization: `Bearer ${token}` };
+  const query = format ? `?format=${format}` : "";
   const resp = await fetch(
-    `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/getDefinition?format=ipynb`,
+    `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/getDefinition${query}`,
     { method: "POST", headers, signal },
   );
   if (resp.status === 200) {
@@ -398,14 +400,14 @@ export async function getNotebookDefinition(
   );
 }
 
-// Download a notebook's .ipynb source from Fabric.
+// Download a notebook's .ipynb source from Fabric (for read-only viewing).
 export async function getNotebookIpynb(
   token: string,
   workspaceId: string,
   itemId: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const def = await getNotebookDefinition(token, workspaceId, itemId, signal);
+  const def = await getNotebookDefinition(token, workspaceId, itemId, "ipynb", signal);
   const part = def.parts?.find((p) => p.path.endsWith(".ipynb"));
   if (!part) {
     throw new Error("Fabric getDefinition: no .ipynb part in the response.");
@@ -413,25 +415,41 @@ export async function getNotebookIpynb(
   return Buffer.from(part.payload, "base64").toString("utf8");
 }
 
-// Overwrite a Fabric notebook's content with the given .ipynb (updateDefinition).
-// Keeps the notebook's other definition parts (e.g. .platform) intact, replacing
-// only the .ipynb payload. This WRITES to Fabric.
-export async function updateNotebookDefinition(
+// Download a notebook's NATIVE source (notebook-content.py) — the format Fabric
+// accepts back on updateDefinition, so it round-trips (unlike .ipynb, which is
+// read-only). Git-friendly too.
+export async function getNotebookSource(
   token: string,
   workspaceId: string,
   itemId: string,
-  ipynb: string,
+): Promise<string> {
+  const def = await getNotebookDefinition(token, workspaceId, itemId, "");
+  const part = def.parts?.find((p) => p.path.endsWith(".py"));
+  if (!part) {
+    throw new Error("Fabric getDefinition: no .py part in the response.");
+  }
+  return Buffer.from(part.payload, "base64").toString("utf8");
+}
+
+// Overwrite a Fabric notebook with the given native .py source (updateDefinition,
+// native format). Keeps the other definition parts (e.g. .platform) intact,
+// replacing only the .py payload. This WRITES to Fabric.
+export async function updateNotebookSource(
+  token: string,
+  workspaceId: string,
+  itemId: string,
+  py: string,
 ): Promise<void> {
   const headers = {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-  const def = await getNotebookDefinition(token, workspaceId, itemId);
-  const part = def.parts?.find((p) => p.path.endsWith(".ipynb"));
+  const def = await getNotebookDefinition(token, workspaceId, itemId, "");
+  const part = def.parts?.find((p) => p.path.endsWith(".py"));
   if (!part || !def.parts) {
-    throw new Error("Fabric updateDefinition: no .ipynb part to replace.");
+    throw new Error("Fabric updateDefinition: no .py part to replace.");
   }
-  part.payload = Buffer.from(ipynb, "utf8").toString("base64");
+  part.payload = Buffer.from(py, "utf8").toString("base64");
   part.payloadType = "InlineBase64";
   const resp = await fetch(
     `${FABRIC_API}/workspaces/${workspaceId}/items/${itemId}/updateDefinition`,
