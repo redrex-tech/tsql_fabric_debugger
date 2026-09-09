@@ -359,9 +359,9 @@ describe("buildDeployNotebook", () => {
 
 describe("parseProcName", () => {
   it("parses schema.name", () => {
-    expect(parseProcName("CREATE PROCEDURE pck_am.prd_x AS x")).toEqual({
-      schema: "pck_am",
-      name: "prd_x",
+    expect(parseProcName("CREATE PROCEDURE sales.load_orders AS x")).toEqual({
+      schema: "sales",
+      name: "load_orders",
     });
   });
   it("defaults schema to dbo when unqualified", () => {
@@ -383,8 +383,8 @@ describe("parseProcName", () => {
 
 describe("artifactPath", () => {
   it("schema-type: kind/schema/name (default)", () => {
-    expect(artifactPath("procedures", "pck_am", "prd_x", "schema-type")).toBe(
-      "procedures/pck_am/prd_x",
+    expect(artifactPath("procedures", "sales", "load_orders", "schema-type")).toBe(
+      "procedures/sales/load_orders",
     );
     expect(artifactPath("deploy", "dbo", "p", "schema-type")).toBe("deploy/dbo/p");
   });
