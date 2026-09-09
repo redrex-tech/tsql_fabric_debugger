@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.8 — preview
+
+- **Discoverability**: richer Marketplace keywords (transact-sql, mssql,
+  microsoft fabric, fabric warehouse, synapse, breakpoints, stored procedure,
+  notebook, etl, …) and a clearer description, so the extension shows up for
+  more than just "t-sql".
+
+
 ## 0.3.7 — preview
 
 - **Notebook round-trip fixed to Fabric's native format**: Fabric's
