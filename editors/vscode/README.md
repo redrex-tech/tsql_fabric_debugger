@@ -85,6 +85,31 @@ This extension does the *debugging*. For IntelliSense, a results grid and
 ad-hoc query editing, install Microsoft's **mssql** extension
 (`ms-mssql.mssql`) — the two complement each other on the same warehouse.
 
+## Fabric CI/CD with any Git provider
+
+A complete loop, without leaving VS Code — and it works with **GitHub, GitLab,
+Bitbucket or Azure DevOps**. That matters because Fabric's *native* Git
+integration only supports GitHub and Azure DevOps; for GitLab/Bitbucket this
+extension is the bridge.
+
+1. **Pull** — *Sync with Fabric → Pull* downloads every procedure (`.sql`) and
+   notebook (native `.py`) into your repo folder, organized by
+   `tsqlFabric.fileLayout`. (Or pull one at a time: *Open Source* /
+   *Save Notebook to Project*.)
+2. **Debug & edit** — set breakpoints, step through, edit locally.
+3. **Commit & Push** — *Commit & Push Fabric folder* stages the folder and
+   pushes to your repo (any provider, your existing Git credentials).
+4. **Create PR / MR** — opens a pull/merge request for the current branch →
+   `tsqlFabric.git.baseBranch` via the provider's API. GitHub uses the built-in
+   sign-in (no token); GitLab/Bitbucket use a PAT stored securely
+   (*Set Git Provider Token*); Azure DevOps opens the browser.
+5. **Deploy** — *Deploy to Fabric* runs a procedure's `CREATE OR ALTER` on the
+   warehouse, or *Update Notebook in Fabric* republishes a notebook. *Sync with
+   Fabric → Deploy* does the whole folder at once. Every warehouse write asks
+   for confirmation and honors the production guard.
+
+Provider tokens are stored in VS Code SecretStorage, never in settings.
+
 ## Debugging safely on a shared / production warehouse
 
 A debug session opens a **real transaction** and executes statements as you

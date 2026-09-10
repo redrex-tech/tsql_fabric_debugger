@@ -153,6 +153,20 @@
         "icon": "$(repo-push)"
       },
       {
+        "command": "tsqlFabric.createPullRequest",
+        "title": "T-SQL Fabric: Create Pull Request / Merge Request",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "tsqlFabric.syncWithFabric",
+        "title": "T-SQL Fabric: Sync with Fabric (pull / deploy)",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "tsqlFabric.setProviderToken",
+        "title": "T-SQL Fabric: Set Git Provider Token (GitLab/Bitbucket)"
+      },
+      {
         "command": "tsqlFabric.refreshWorkspace",
         "title": "T-SQL Fabric: Refresh Fabric Workspace",
         "icon": "$(refresh)"
@@ -215,9 +229,14 @@
           "group": "navigation@1"
         },
         {
-          "command": "tsqlFabric.refreshWorkspace",
+          "command": "tsqlFabric.syncWithFabric",
           "when": "view == tsqlFabricWorkspace",
           "group": "navigation@2"
+        },
+        {
+          "command": "tsqlFabric.refreshWorkspace",
+          "when": "view == tsqlFabricWorkspace",
+          "group": "navigation@3"
         },
         {
           "command": "tsqlFabric.openSettings",
@@ -230,9 +249,14 @@
           "group": "navigation@1"
         },
         {
-          "command": "tsqlFabric.refreshFiles",
+          "command": "tsqlFabric.createPullRequest",
           "when": "view == tsqlFabricFiles",
           "group": "navigation@2"
+        },
+        {
+          "command": "tsqlFabric.refreshFiles",
+          "when": "view == tsqlFabricFiles",
+          "group": "navigation@3"
         },
         {
           "command": "tsqlFabric.openSettings",
@@ -397,6 +421,11 @@
             "type": "string",
             "default": "Update Fabric artifacts",
             "markdownDescription": "Default commit message suggested by **Commit & Push Fabric folder** (you can edit it each time)."
+          },
+          "tsqlFabric.git.baseBranch": {
+            "type": "string",
+            "default": "main",
+            "markdownDescription": "Target branch for **Create Pull Request / Merge Request**. The current branch is the source. Works with GitHub, GitLab and Bitbucket via their APIs (Azure DevOps opens the browser); tokens are stored securely, never here."
           }
         }
       }

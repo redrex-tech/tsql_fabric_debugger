@@ -106,6 +106,34 @@ def steppable_lines(sql_text):
     return sorted(lines)
 
 
+def fetch_all_sources(server=None, database=None, lock_timeout=30):
+    """Every deployed procedure's source, on ONE short-lived session.
+
+    For a full pull/sync: lists the procedures and reads each OBJECT_DEFINITION
+    within a single connection (far faster than one process per procedure).
+    Returns [{"schema", "name", "source"}]; read-only.
+    """
+    conn = connect(server, database, autocommit=True, lock_timeout=lock_timeout)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ROUTINE_SCHEMA, ROUTINE_NAME "
+            "FROM INFORMATION_SCHEMA.ROUTINES "
+            "WHERE ROUTINE_TYPE = 'PROCEDURE' "
+            "ORDER BY ROUTINE_SCHEMA, ROUTINE_NAME;")
+        procs = cur.fetchall()
+        out = []
+        for schema, name in procs:
+            cur.execute("SELECT OBJECT_DEFINITION(OBJECT_ID(?));",
+                        (f"{schema}.{name}",))
+            row = cur.fetchone()
+            out.append({"schema": schema, "name": name,
+                        "source": row[0] if row else None})
+        return out
+    finally:
+        conn.close()
+
+
 import re as _re
 
 
@@ -140,7 +168,8 @@ def main(argv=None):
         description="List warehouse objects as JSON (for tooling).")
     ap.add_argument("what",
                     choices=["procedures", "parameters", "kill-orphans",
-                             "steppable-lines", "fetch-source", "deploy"],
+                             "steppable-lines", "fetch-source",
+                             "fetch-all-sources", "deploy"],
                     help="what to list, the orphan-session janitor, the "
                          "breakpoint-able lines of a .sql (offline), a deployed "
                          "procedure's source, or deploy a .sql (COMMITS)")
@@ -169,6 +198,9 @@ def main(argv=None):
             from .connection import fetch_source
             result = {"source": fetch_source(args.proc, args.server,
                                              args.database)}
+        elif args.what == "fetch-all-sources":
+            result = fetch_all_sources(args.server, args.database,
+                                       args.lock_timeout)
         elif args.what == "deploy":
             sql = (open(args.file, encoding="utf-8", errors="replace").read()
                    if args.file else sys.stdin.read())

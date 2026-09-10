@@ -12,6 +12,11 @@ import {
   stampNotebookLink,
   readNotebookLink,
   stripNotebookLink,
+  parseGitRemote,
+  prApiEndpoint,
+  prApiBody,
+  prUrlFromResponse,
+  prWebUrl,
   artifactPath,
   toCreateOrAlter,
   toCsv,
@@ -448,5 +453,86 @@ describe("notebook link (.py round-trip)", () => {
     const twice = stampNotebookLink(once, { workspaceId: "c", itemId: "d" });
     expect(twice.match(/tsqlFabric-link/g)).toHaveLength(1);
     expect(readNotebookLink(twice)).toEqual({ workspaceId: "c", itemId: "d", displayName: undefined });
+  });
+});
+
+describe("parseGitRemote", () => {
+  it("parses GitHub https and ssh", () => {
+    expect(parseGitRemote("https://github.com/redrex-tech/tool.git")).toEqual({
+      provider: "github", host: "github.com", owner: "redrex-tech", repo: "tool",
+    });
+    expect(parseGitRemote("git@github.com:redrex-tech/tool.git")).toEqual({
+      provider: "github", host: "github.com", owner: "redrex-tech", repo: "tool",
+    });
+  });
+  it("parses GitLab with nested groups", () => {
+    expect(parseGitRemote("https://gitlab.com/group/sub/proj.git")).toEqual({
+      provider: "gitlab", host: "gitlab.com", owner: "group/sub", repo: "proj",
+    });
+  });
+  it("parses Bitbucket with credentials in URL", () => {
+    expect(parseGitRemote("https://user@bitbucket.org/team/repo.git")).toEqual({
+      provider: "bitbucket", host: "bitbucket.org", owner: "team", repo: "repo",
+    });
+  });
+  it("parses Azure DevOps https (_git) and ssh (v3)", () => {
+    expect(parseGitRemote("https://dev.azure.com/org/project/_git/repo")).toEqual({
+      provider: "azure-devops", host: "dev.azure.com", owner: "org/project", repo: "repo",
+    });
+    expect(parseGitRemote("git@ssh.dev.azure.com:v3/org/project/repo")).toEqual({
+      provider: "azure-devops", host: "ssh.dev.azure.com", owner: "org/project", repo: "repo",
+    });
+  });
+  it("detects self-hosted by host substring", () => {
+    expect(parseGitRemote("https://gitlab.mycorp.com/team/repo.git")?.provider).toBe("gitlab");
+  });
+  it("returns undefined for junk", () => {
+    expect(parseGitRemote("not a url")).toBeUndefined();
+    expect(parseGitRemote("https://host.com/only-one-segment")).toBeUndefined();
+  });
+});
+
+describe("PR API builders", () => {
+  const gh = parseGitRemote("https://github.com/o/r.git")!;
+  const gl = parseGitRemote("https://gitlab.com/g/s/r.git")!;
+  const bb = parseGitRemote("https://bitbucket.org/o/r.git")!;
+
+  it("endpoints per provider", () => {
+    expect(prApiEndpoint(gh)).toBe("https://api.github.com/repos/o/r/pulls");
+    expect(prApiEndpoint(gl)).toBe(
+      "https://gitlab.com/api/v4/projects/g%2Fs%2Fr/merge_requests",
+    );
+    expect(prApiEndpoint(bb)).toBe(
+      "https://api.bitbucket.org/2.0/repositories/o/r/pullrequests",
+    );
+  });
+  it("GitHub Enterprise endpoint uses /api/v3", () => {
+    const ghe = parseGitRemote("https://github.mycorp.com/o/r.git")!;
+    expect(prApiEndpoint(ghe)).toBe("https://github.mycorp.com/api/v3/repos/o/r/pulls");
+  });
+  it("bodies per provider", () => {
+    const f = { title: "T", body: "B", head: "feat", base: "main" };
+    expect(prApiBody("github", f)).toEqual({ title: "T", body: "B", head: "feat", base: "main" });
+    expect(prApiBody("gitlab", f)).toEqual({
+      title: "T", description: "B", source_branch: "feat", target_branch: "main",
+    });
+    expect(prApiBody("bitbucket", f)).toEqual({
+      title: "T", description: "B",
+      source: { branch: { name: "feat" } },
+      destination: { branch: { name: "main" } },
+    });
+  });
+  it("parses the created URL from each response", () => {
+    expect(prUrlFromResponse("github", { html_url: "u" })).toBe("u");
+    expect(prUrlFromResponse("gitlab", { web_url: "u" })).toBe("u");
+    expect(prUrlFromResponse("bitbucket", { links: { html: { href: "u" } } })).toBe("u");
+    expect(prUrlFromResponse("github", {})).toBeUndefined();
+  });
+  it("browser fallback URLs", () => {
+    expect(prWebUrl(gh, "feat", "main")).toBe(
+      "https://github.com/o/r/compare/main...feat?expand=1",
+    );
+    expect(prWebUrl(bb, "feat", "main")).toContain("bitbucket.org/o/r/pull-requests/new");
+    expect(prWebUrl(gl, "feat", "main")).toContain("/-/merge_requests/new");
   });
 });
