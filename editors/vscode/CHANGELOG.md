@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 — preview
+
+Milestone: a complete Fabric debug + git + deploy environment (rolling out in
+phases).
+
+- **Deploy to Fabric** (phase 1): a rocket button on a procedure (Warehouse
+  Procedures) or a `.sql` (Project Files) runs its `CREATE OR ALTER` against the
+  warehouse — a committed write — after a **modal confirmation** and the
+  production guard (`productionWarehouses`). Generating artifacts
+  (*Export for Fabric deploy*) stays as the non-executing alternative.
+
+
 ## 0.3.8 — preview
 
 - **Discoverability**: richer Marketplace keywords (transact-sql, mssql,

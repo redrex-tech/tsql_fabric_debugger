@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tsql-fabric-debugger"
-version = "0.3.3"
+version = "0.3.4"
 description = "Step-by-step debugger for T-SQL stored procedures on the Microsoft Fabric Warehouse"
 readme = "README.md"
 license = "MIT"

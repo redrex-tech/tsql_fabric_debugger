@@ -33,6 +33,7 @@ import {
   updateNotebookSource,
   getSteppableLines,
   fetchProcedureSource,
+  deployProcedure,
   killOrphanSessions,
   getToken,
   listNotebooks,
@@ -116,6 +117,10 @@ export function activate(context: vscode.ExtensionContext): void {
       openProcedureSource,
     ),
     vscode.commands.registerCommand("tsqlFabric.exportForFabric", exportForFabric),
+    vscode.commands.registerCommand(
+      "tsqlFabric.deployProcedure",
+      deployProcedureToFabric,
+    ),
     vscode.commands.registerCommand("tsqlFabric.uploadToGit", uploadToGit),
     vscode.commands.registerCommand("tsqlFabric.openSettings", () => {
       void vscode.commands.executeCommand(
@@ -1058,6 +1063,83 @@ async function exportForFabric(arg?: vscode.Uri | FileNode): Promise<void> {
     void vscode.commands.executeCommand("revealInExplorer", nbFile);
     void vscode.window.showInformationMessage(
       `T-SQL Fabric: exported ${label} (.sql + Deploy.ipynb) — upload/run them in Fabric to deploy.`,
+    );
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// local → Fabric: EXECUTE a procedure's CREATE OR ALTER against the warehouse
+// (a committed write). Gated by a modal confirmation and the production guard.
+async function deployProcedureToFabric(
+  arg?: vscode.Uri | FileNode | ProcNode,
+): Promise<void> {
+  let uri: vscode.Uri | undefined;
+  let sqlText: string | undefined;
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  if (!server || !database) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: connect to a warehouse first.",
+    );
+    return;
+  }
+  // A procedure node → fetch its deployed source; a .sql file/editor → its text.
+  if (arg instanceof vscode.Uri) {
+    uri = arg;
+  } else if (arg && "resourceUri" in arg) {
+    uri = arg.resourceUri;
+  } else if (arg && "proc" in arg && arg.proc) {
+    try {
+      sqlText = await fetchProcedureSource(
+        resolvePython(),
+        server,
+        database,
+        `${arg.proc.schema}.${arg.proc.name}`,
+      );
+    } catch (err) {
+      reportError(err);
+      return;
+    }
+  }
+  if (sqlText === undefined) {
+    uri = uri ?? vscode.window.activeTextEditor?.document.uri;
+    if (!uri || !uri.fsPath.toLowerCase().endsWith(".sql")) {
+      void vscode.window.showErrorMessage(
+        "T-SQL Fabric: select a .sql (or a procedure) to deploy.",
+      );
+      return;
+    }
+    sqlText = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString(
+      "utf8",
+    );
+  }
+  const ddl = toCreateOrAlter(sqlText);
+  const isProd = isProductionTarget(
+    server,
+    database,
+    cfg.get<string[]>("productionWarehouses") ?? [],
+  );
+  const go = await vscode.window.showWarningMessage(
+    `⚠ Deploy this procedure to "${database}"${isProd ? " (PRODUCTION)" : ""}? ` +
+      "This runs CREATE OR ALTER on the warehouse — a committed write.",
+    { modal: true },
+    "Deploy",
+  );
+  if (go !== "Deploy") {
+    return;
+  }
+  try {
+    const r = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: deploying to ${database}…`,
+      },
+      () => deployProcedure(resolvePython(), server, database, ddl),
+    );
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: deployed to ${database} (${r.batches ?? 1} batch(es)).`,
     );
   } catch (err) {
     reportError(err);

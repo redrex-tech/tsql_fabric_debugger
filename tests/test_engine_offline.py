@@ -1353,6 +1353,27 @@ def test_fetch_source_offline(fake_session):
     assert "CREATE PROCEDURE dbo.p" in fetch_source("dbo.p", "s", "d")
 
 
+def test_deploy_sql_offline(fake_session):
+    """deploy_sql executes the batches and reports how many ran (autocommit)."""
+    from tsql_fabric_debugger.introspect import deploy_sql
+    sql = "CREATE OR ALTER PROCEDURE dbo.p AS SELECT 1;\nGO\n"
+    assert deploy_sql(sql, "s", "d") == {"ok": True, "batches": 1}
+
+
+def test_deploy_sql_splits_on_go(fake_session):
+    """GO separates batches; blank batches are skipped."""
+    from tsql_fabric_debugger.introspect import deploy_sql
+    sql = "CREATE OR ALTER PROCEDURE dbo.a AS SELECT 1;\nGO\nSELECT 2;\nGO\n"
+    assert deploy_sql(sql, "s", "d") == {"ok": True, "batches": 2}
+
+
+def test_deploy_sql_empty_raises(fake_session):
+    from tsql_fabric_debugger.introspect import deploy_sql
+    import pytest
+    with pytest.raises(ValueError):
+        deploy_sql("   \n GO \n", "s", "d")
+
+
 def test_fetch_source_cli_requires_proc():
     """The fetch-source CLI verb errors (JSON) without --proc."""
     from tsql_fabric_debugger.introspect import main
