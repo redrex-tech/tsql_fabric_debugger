@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Debug T-SQL (Transact-SQL) stored procedures on the Microsoft Fabric Warehouse: breakpoints, step over/into/out, watch variables and a result-set grid — with ROLLBACK. Pull, edit and deploy procedures and notebooks.",
-  "version": "0.3.8",
+  "version": "0.4.0",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
@@ -200,6 +200,11 @@
         "command": "tsqlFabric.exportForFabric",
         "title": "T-SQL Fabric: Export for Fabric deploy (.sql + notebook)",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "tsqlFabric.deployProcedure",
+        "title": "T-SQL Fabric: Deploy to Fabric (run CREATE OR ALTER)",
+        "icon": "$(rocket)"
       }
     ],
     "menus": {
@@ -262,6 +267,11 @@
           "group": "inline@2"
         },
         {
+          "command": "tsqlFabric.deployProcedure",
+          "when": "view == tsqlFabricFiles && viewItem == sqlFile",
+          "group": "inline@3"
+        },
+        {
           "command": "tsqlFabric.debugProcedure",
           "when": "view == tsqlFabricProcedures && viewItem == procedure",
           "group": "inline"
@@ -270,6 +280,11 @@
           "command": "tsqlFabric.openProcedureSource",
           "when": "view == tsqlFabricProcedures && viewItem == procedure",
           "group": "inline@2"
+        },
+        {
+          "command": "tsqlFabric.deployProcedure",
+          "when": "view == tsqlFabricProcedures && viewItem == procedure",
+          "group": "inline@3"
         },
         {
           "command": "tsqlFabric.saveNotebookToProject",

@@ -175,6 +175,47 @@ export async function listParameters(
   ])) as ProcParameter[];
 }
 
+// Deploy a T-SQL script (e.g. CREATE OR ALTER PROCEDURE) to the warehouse —
+// executes and COMMITS. WRITES to the warehouse. The SQL is fed on stdin; the
+// DB token is passed via the environment. Tooling gates this behind a
+// confirmation and a production guard.
+export async function deployProcedure(
+  python: string,
+  server: string,
+  database: string,
+  sql: string,
+): Promise<{ ok: boolean; batches?: number }> {
+  const env = await envWithToken();
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      python,
+      [
+        "-m",
+        "tsql_fabric_debugger.introspect",
+        "deploy",
+        "--server",
+        server,
+        "--database",
+        database,
+      ],
+      { timeout: 120000, maxBuffer: 8 * 1024 * 1024, env },
+      (err, stdout, stderr) => {
+        const r = parseIntrospectResult(
+          stdout,
+          err != null,
+          String(stderr || err || ""),
+        );
+        if ("error" in r) {
+          reject(new Error(r.error));
+        } else {
+          resolve(r.ok as { ok: boolean; batches?: number });
+        }
+      },
+    );
+    child.stdin?.end(sql);
+  });
+}
+
 // Fetch a deployed procedure's source (OBJECT_DEFINITION) so it can be opened
 // as a local .sql for breakpoint debugging. Read-only; nothing is written to
 // the warehouse.

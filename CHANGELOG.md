@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.4 — 2026-09-10
+
+- **`deploy` (introspection)**: `... introspect deploy [--file f]` (or stdin)
+  executes a T-SQL script (e.g. `CREATE OR ALTER PROCEDURE`) against the
+  warehouse and **COMMITS** — splitting on `GO` batch separators. The one lib
+  path that writes outside the ROLLBACK-guarded debugger; tooling gates it
+  behind a confirmation and a production guard.
+
+
 ## 0.3.3 — 2026-09-08
 
 - **`steppable-lines` (introspection)**: `python -m tsql_fabric_debugger.introspect steppable-lines`

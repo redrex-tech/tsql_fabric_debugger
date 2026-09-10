@@ -106,16 +106,44 @@ def steppable_lines(sql_text):
     return sorted(lines)
 
 
+import re as _re
+
+
+def deploy_sql(sql_text, server=None, database=None):
+    """Execute a T-SQL script against the warehouse and COMMIT.
+
+    Unlike the debugger (which always ROLLBACKs), this WRITES: it deploys DDL
+    such as ``CREATE OR ALTER PROCEDURE``. Runs on a short-lived autocommit
+    session, splitting on ``GO`` batch separators (a client separator, not a
+    T-SQL statement). Returns {"ok": True, "batches": N}. Tooling gates this
+    behind a confirmation and a production guard.
+    """
+    conn = connect(server, database, autocommit=True)
+    try:
+        cur = conn.cursor()
+        batches = _re.split(r"(?im)^[ \t]*GO[ \t]*;?[ \t]*$", sql_text)
+        run = 0
+        for batch in batches:
+            if batch.strip():
+                cur.execute(batch)
+                run += 1
+        if run == 0:
+            raise ValueError("nothing to deploy (empty script)")
+        return {"ok": True, "batches": run}
+    finally:
+        conn.close()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="tsql-fabric-introspect",
         description="List warehouse objects as JSON (for tooling).")
     ap.add_argument("what",
                     choices=["procedures", "parameters", "kill-orphans",
-                             "steppable-lines", "fetch-source"],
+                             "steppable-lines", "fetch-source", "deploy"],
                     help="what to list, the orphan-session janitor, the "
-                         "breakpoint-able lines of a .sql (offline), or a "
-                         "deployed procedure's source")
+                         "breakpoint-able lines of a .sql (offline), a deployed "
+                         "procedure's source, or deploy a .sql (COMMITS)")
     ap.add_argument("--proc", help="schema.proc (required for parameters)")
     ap.add_argument("--file", help="path to a .sql (steppable-lines); "
                                    "omit to read the SQL from stdin")
@@ -141,6 +169,10 @@ def main(argv=None):
             from .connection import fetch_source
             result = {"source": fetch_source(args.proc, args.server,
                                              args.database)}
+        elif args.what == "deploy":
+            sql = (open(args.file, encoding="utf-8", errors="replace").read()
+                   if args.file else sys.stdin.read())
+            result = deploy_sql(sql, args.server, args.database)
         elif args.what == "parameters":
             if not args.proc:
                 raise ValueError("--proc is required for parameters")
