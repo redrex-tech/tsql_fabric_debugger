@@ -1391,3 +1391,18 @@ def test_steppable_lines_rejects_loose_script():
     import pytest
     with pytest.raises(Exception):
         steppable_lines("SELECT 1;")
+
+
+def test_fetch_all_sources_offline(fake_session):
+    """fetch_all_sources lists procedures and reads each definition on one session."""
+    from tsql_fabric_debugger.introspect import fetch_all_sources
+    fake_session.adhoc.append(("information_schema.routines",
+                               ["ROUTINE_SCHEMA", "ROUTINE_NAME"],
+                               [("dbo", "a"), ("pck", "b")]))
+    fake_session.object_defs["DBO.A"] = "CREATE PROCEDURE dbo.a AS SELECT 1;"
+    fake_session.object_defs["PCK.B"] = "CREATE PROCEDURE pck.b AS SELECT 2;"
+    result = fetch_all_sources("s", "d")
+    assert result == [
+        {"schema": "dbo", "name": "a", "source": "CREATE PROCEDURE dbo.a AS SELECT 1;"},
+        {"schema": "pck", "name": "b", "source": "CREATE PROCEDURE pck.b AS SELECT 2;"},
+    ]

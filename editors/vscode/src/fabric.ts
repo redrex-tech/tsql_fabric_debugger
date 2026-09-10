@@ -3,7 +3,53 @@
 // the Python library already requires (AzureCliCredential) — one `az login`.
 
 import { execFile } from "node:child_process";
-import { parseIntrospectResult } from "./util";
+import {
+  parseIntrospectResult,
+  prApiEndpoint,
+  prApiBody,
+  prUrlFromResponse,
+  type GitRemote,
+} from "./util";
+
+// Create a pull/merge request via the provider's API. Provider-specific auth
+// header + response shape; the endpoint/body/URL parsing is pure (util.ts).
+export async function createPullRequestViaApi(
+  remote: GitRemote,
+  token: string,
+  fields: { title: string; body: string; head: string; base: string },
+): Promise<string> {
+  const endpoint = prApiEndpoint(remote);
+  if (!endpoint) {
+    throw new Error(`No PR API for provider "${remote.provider}".`);
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (remote.provider === "github") {
+    headers.Authorization = `Bearer ${token}`;
+    headers.Accept = "application/vnd.github+json";
+    headers["X-GitHub-Api-Version"] = "2022-11-28";
+  } else if (remote.provider === "gitlab") {
+    headers["PRIVATE-TOKEN"] = token;
+  } else if (remote.provider === "bitbucket") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const resp = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(prApiBody(remote.provider, fields)),
+  });
+  if (!resp.ok) {
+    throw new Error(
+      `${remote.provider} PR API ${resp.status}: ${(await resp.text()).slice(0, 300)}`,
+    );
+  }
+  const url = prUrlFromResponse(remote.provider, await resp.json());
+  if (!url) {
+    throw new Error("PR created, but the response had no URL.");
+  }
+  return url;
+}
 
 const FABRIC_API = "https://api.fabric.microsoft.com/v1";
 const FABRIC_RESOURCE = "https://api.fabric.microsoft.com";
@@ -214,6 +260,22 @@ export async function deployProcedure(
     );
     child.stdin?.end(sql);
   });
+}
+
+// Every deployed procedure's source on one connection (for a full pull/sync) —
+// much faster than one process per procedure. Read-only.
+export async function fetchAllSources(
+  python: string,
+  server: string,
+  database: string,
+): Promise<{ schema: string; name: string; source: string | null }[]> {
+  return (await runIntrospect(python, [
+    "fetch-all-sources",
+    "--server",
+    server,
+    "--database",
+    database,
+  ])) as { schema: string; name: string; source: string | null }[];
 }
 
 // Fetch a deployed procedure's source (OBJECT_DEFINITION) so it can be opened

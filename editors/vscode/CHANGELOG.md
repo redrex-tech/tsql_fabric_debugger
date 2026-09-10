@@ -10,6 +10,16 @@ phases).
   warehouse — a committed write — after a **modal confirmation** and the
   production guard (`productionWarehouses`). Generating artifacts
   (*Export for Fabric deploy*) stays as the non-executing alternative.
+- **Create Pull Request / Merge Request** (phase 2): a button in Project Files
+  opens a PR/MR for the current branch → `tsqlFabric.git.baseBranch` via the
+  provider's API — **GitHub** (built-in GitHub sign-in, no PAT), **GitLab** and
+  **Bitbucket** (PAT stored in SecretStorage via *Set Git Provider Token*);
+  Azure DevOps / unknown open the browser. Bridges GitLab/Bitbucket, which
+  Fabric's native Git integration does not support.
+- **Sync with Fabric** (phase 3): one command, pick a direction —
+  **← Pull** downloads all procedures + notebooks into the folder, or
+  **→ Deploy** publishes the folder's procedures (execute) and notebooks
+  (updateDefinition) to the warehouse, after a confirmation + production guard.
 
 
 ## 0.3.8 — preview

@@ -346,3 +346,156 @@ export function readNotebookLink(py: string): NotebookIdentity | undefined {
 export function stripNotebookLink(py: string): string {
   return py.replace(/^# tsqlFabric-link: .+\r?\n?/m, "");
 }
+
+// ---------------------------------------------------------------------------
+// Git provider detection + pull/merge-request API shapes. Pure (vscode-free),
+// so provider parsing and request building are unit/mutation-tested; the auth
+// and fetch live in the extension.
+// ---------------------------------------------------------------------------
+export type GitProvider =
+  | "github"
+  | "gitlab"
+  | "bitbucket"
+  | "azure-devops"
+  | "unknown";
+
+export interface GitRemote {
+  provider: GitProvider;
+  host: string; // lowercased host (supports self-hosted)
+  owner: string; // org / group(/subgroups) / azure "org/project"
+  repo: string;
+}
+
+// Parse a git remote URL (https or ssh, with optional credentials/port/.git).
+export function parseGitRemote(url: string): GitRemote | undefined {
+  const s = url.trim().replace(/\.git\/?$/, "");
+  let host: string;
+  let path: string;
+  const ssh = s.match(/^[\w.-]+@([\w.-]+):(.+)$/);
+  const https = s.match(/^https?:\/\/(?:[^@/]+@)?([\w.-]+)(?::\d+)?\/(.+)$/);
+  if (ssh) {
+    [, host, path] = ssh;
+  } else if (https) {
+    [, host, path] = https;
+  } else {
+    return undefined;
+  }
+  host = host.toLowerCase();
+  path = path.replace(/^\/+|\/+$/g, "");
+  const provider: GitProvider = host.includes("github")
+    ? "github"
+    : host.includes("gitlab")
+      ? "gitlab"
+      : host.includes("bitbucket")
+        ? "bitbucket"
+        : host.includes("azure") || host.includes("visualstudio")
+          ? "azure-devops"
+          : "unknown";
+
+  if (provider === "azure-devops") {
+    // https: org/project/_git/repo   ·   ssh: v3/org/project/repo
+    const g = path.replace(/^v3\//, "").split("/_git/");
+    if (g.length === 2) {
+      return { provider, host, owner: g[0], repo: g[1].split("/")[0] };
+    }
+    const parts = path.replace(/^v3\//, "").split("/");
+    if (parts.length >= 3) {
+      return {
+        provider,
+        host,
+        owner: `${parts[0]}/${parts[1]}`,
+        repo: parts[2],
+      };
+    }
+    return undefined;
+  }
+  const parts = path.split("/");
+  if (parts.length < 2) {
+    return undefined;
+  }
+  const repo = parts.pop() as string;
+  return { provider, host, owner: parts.join("/"), repo };
+}
+
+// The provider's create-PR/MR API endpoint for a remote.
+export function prApiEndpoint(r: GitRemote): string {
+  switch (r.provider) {
+    case "github": {
+      const base =
+        r.host === "github.com"
+          ? "https://api.github.com"
+          : `https://${r.host}/api/v3`;
+      return `${base}/repos/${r.owner}/${r.repo}/pulls`;
+    }
+    case "gitlab": {
+      const proj = encodeURIComponent(`${r.owner}/${r.repo}`);
+      return `https://${r.host}/api/v4/projects/${proj}/merge_requests`;
+    }
+    case "bitbucket":
+      return `https://api.bitbucket.org/2.0/repositories/${r.owner}/${r.repo}/pullrequests`;
+    default:
+      return "";
+  }
+}
+
+// The provider-specific JSON body for creating a PR/MR.
+export function prApiBody(
+  provider: GitProvider,
+  f: { title: string; body: string; head: string; base: string },
+): Record<string, unknown> {
+  switch (provider) {
+    case "github":
+      return { title: f.title, body: f.body, head: f.head, base: f.base };
+    case "gitlab":
+      return {
+        title: f.title,
+        description: f.body,
+        source_branch: f.head,
+        target_branch: f.base,
+      };
+    case "bitbucket":
+      return {
+        title: f.title,
+        description: f.body,
+        source: { branch: { name: f.head } },
+        destination: { branch: { name: f.base } },
+      };
+    default:
+      return {};
+  }
+}
+
+// Pull the created PR/MR web URL out of the provider's API response.
+export function prUrlFromResponse(
+  provider: GitProvider,
+  json: unknown,
+): string | undefined {
+  const j = json as Record<string, unknown>;
+  if (provider === "github") {
+    return typeof j.html_url === "string" ? j.html_url : undefined;
+  }
+  if (provider === "gitlab") {
+    return typeof j.web_url === "string" ? j.web_url : undefined;
+  }
+  if (provider === "bitbucket") {
+    const html = (j.links as { html?: { href?: string } } | undefined)?.html;
+    return typeof html?.href === "string" ? html.href : undefined;
+  }
+  return undefined;
+}
+
+// Browser fallback: the provider's "create PR/MR" web page for head → base.
+export function prWebUrl(r: GitRemote, head: string, base: string): string {
+  switch (r.provider) {
+    case "github":
+      return `https://${r.host}/${r.owner}/${r.repo}/compare/${base}...${head}?expand=1`;
+    case "gitlab":
+      return `https://${r.host}/${r.owner}/${r.repo}/-/merge_requests/new?merge_request%5Bsource_branch%5D=${encodeURIComponent(head)}&merge_request%5Btarget_branch%5D=${encodeURIComponent(base)}`;
+    case "bitbucket":
+      return `https://bitbucket.org/${r.owner}/${r.repo}/pull-requests/new?source=${encodeURIComponent(head)}&dest=${encodeURIComponent(base)}`;
+    case "azure-devops":
+      return `https://${r.host}/${r.owner}/_git/${r.repo}/pullrequestcreate?sourceRef=${encodeURIComponent(head)}&targetRef=${encodeURIComponent(base)}`;
+    default:
+      return "";
+  }
+}

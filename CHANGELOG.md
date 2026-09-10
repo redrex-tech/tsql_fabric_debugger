@@ -8,6 +8,9 @@
   path that writes outside the ROLLBACK-guarded debugger; tooling gates it
   behind a confirmation and a production guard.
 
+- **`fetch-all-sources`**: every deployed procedure's OBJECT_DEFINITION on one
+  connection (for a full pull/sync) — far faster than one process per procedure.
+
 
 ## 0.3.3 — 2026-09-08
 

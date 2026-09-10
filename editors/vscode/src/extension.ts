@@ -20,6 +20,10 @@ import {
   stampNotebookLink,
   readNotebookLink,
   stripNotebookLink,
+  parseGitRemote,
+  prApiEndpoint,
+  prWebUrl,
+  type GitRemote,
   type ResultSet,
   type ResultSetPayload,
 } from "./util";
@@ -33,7 +37,9 @@ import {
   updateNotebookSource,
   getSteppableLines,
   fetchProcedureSource,
+  fetchAllSources,
   deployProcedure,
+  createPullRequestViaApi,
   killOrphanSessions,
   getToken,
   listNotebooks,
@@ -122,6 +128,15 @@ export function activate(context: vscode.ExtensionContext): void {
       deployProcedureToFabric,
     ),
     vscode.commands.registerCommand("tsqlFabric.uploadToGit", uploadToGit),
+    vscode.commands.registerCommand("tsqlFabric.createPullRequest", () =>
+      createPullRequest(context),
+    ),
+    vscode.commands.registerCommand("tsqlFabric.setProviderToken", () =>
+      setProviderToken(context),
+    ),
+    vscode.commands.registerCommand("tsqlFabric.syncWithFabric", () =>
+      syncWithFabric(context),
+    ),
     vscode.commands.registerCommand("tsqlFabric.openSettings", () => {
       void vscode.commands.executeCommand(
         "workbench.action.openSettings",
@@ -1146,14 +1161,198 @@ async function deployProcedureToFabric(
   }
 }
 
+// Bidirectional sync between the warehouse and the local repo folder.
+async function syncWithFabric(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  const dir = localFabricDir();
+  if (!server || !database) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: connect to a warehouse first.",
+    );
+    return;
+  }
+  if (!dir) {
+    void vscode.window.showErrorMessage("T-SQL Fabric: open a folder first.");
+    return;
+  }
+  const choice = await vscode.window.showQuickPick(
+    [
+      {
+        label: "$(cloud-download) Pull from Fabric → repo",
+        detail: "Download all procedures and notebooks into the folder (read-only).",
+        dir: "pull" as const,
+      },
+      {
+        label: "$(rocket) Deploy repo → Fabric",
+        detail: "Publish the folder's procedures and notebooks to the warehouse (writes).",
+        dir: "deploy" as const,
+      },
+    ],
+    { placeHolder: `Sync "${database}" ⇄ local folder — direction?` },
+  );
+  if (!choice) {
+    return;
+  }
+  const python = resolvePython();
+  const layout = cfg.get<string>("fileLayout", "schema-type");
+  try {
+    if (choice.dir === "pull") {
+      const [procs, nbs] = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `T-SQL Fabric: pulling from ${database}…`,
+        },
+        async () => {
+          let nbCount = 0;
+          const all = (await fetchAllSources(python, server, database)).filter(
+            (p) => p.source,
+          );
+          for (const p of all) {
+            const rel = artifactPath("procedures", p.schema, p.name, layout);
+            const file = vscode.Uri.joinPath(dir, `${rel}.sql`);
+            await vscode.workspace.fs.createDirectory(
+              vscode.Uri.joinPath(file, ".."),
+            );
+            await vscode.workspace.fs.writeFile(
+              file,
+              Buffer.from(toCreateOrAlter(p.source as string), "utf8"),
+            );
+          }
+          const token = await getToken();
+          const wsId =
+            context.workspaceState.get<string>(WS_KEY) ??
+            (await findWorkspaceForServer(token, server));
+          if (wsId) {
+            for (const nb of await listNotebooks(token, wsId)) {
+              const py = stampNotebookLink(
+                await getNotebookSource(token, nb.workspaceId, nb.id),
+                {
+                  workspaceId: nb.workspaceId,
+                  itemId: nb.id,
+                  displayName: nb.displayName,
+                },
+              );
+              const safe = nb.displayName.replace(/[^\w.\- ]+/g, "_");
+              const file = vscode.Uri.joinPath(dir, "notebooks", `${safe}.py`);
+              await vscode.workspace.fs.createDirectory(
+                vscode.Uri.joinPath(file, ".."),
+              );
+              await vscode.workspace.fs.writeFile(
+                file,
+                Buffer.from(py, "utf8"),
+              );
+              nbCount++;
+            }
+          }
+          return [all.length, nbCount];
+        },
+      );
+      void vscode.window.showInformationMessage(
+        `T-SQL Fabric: pulled ${procs} procedure(s) and ${nbs} notebook(s).`,
+      );
+      return;
+    }
+
+    // Deploy → Fabric
+    const exclude = "**/{node_modules,.venv,.git,dist,__pycache__}/**";
+    const folder = cfg.get<string>("localFolder", "fabric");
+    const procFiles = await vscode.workspace.findFiles(
+      `${folder}/procedures/**/*.sql`,
+      exclude,
+    );
+    const nbFiles = await vscode.workspace.findFiles(
+      `${folder}/notebooks/**/*.py`,
+      exclude,
+    );
+    if (procFiles.length + nbFiles.length === 0) {
+      void vscode.window.showInformationMessage(
+        "T-SQL Fabric: nothing to deploy — pull first or add files under the Fabric folder.",
+      );
+      return;
+    }
+    const isProd = isProductionTarget(
+      server,
+      database,
+      cfg.get<string[]>("productionWarehouses") ?? [],
+    );
+    const go = await vscode.window.showWarningMessage(
+      `⚠ Deploy ${procFiles.length} procedure(s) and ${nbFiles.length} notebook(s) to "${database}"${isProd ? " (PRODUCTION)" : ""}? This creates/overwrites them in the cloud.`,
+      { modal: true },
+      "Deploy all",
+    );
+    if (go !== "Deploy all") {
+      return;
+    }
+    const failures = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: deploying to ${database}…`,
+      },
+      async () => {
+        const errs: string[] = [];
+        for (const f of procFiles) {
+          try {
+            const sql = toCreateOrAlter(
+              Buffer.from(await vscode.workspace.fs.readFile(f)).toString("utf8"),
+            );
+            await deployProcedure(python, server, database, sql);
+          } catch (e) {
+            errs.push(`${uriBasename(f)}: ${(e as Error).message}`);
+          }
+        }
+        const token = await getToken();
+        for (const f of nbFiles) {
+          try {
+            const py = Buffer.from(
+              await vscode.workspace.fs.readFile(f),
+            ).toString("utf8");
+            const id = readNotebookLink(py);
+            if (id) {
+              await updateNotebookSource(
+                token,
+                id.workspaceId,
+                id.itemId,
+                stripNotebookLink(py),
+              );
+            }
+          } catch (e) {
+            errs.push(`${uriBasename(f)}: ${(e as Error).message}`);
+          }
+        }
+        return errs;
+      },
+    );
+    if (failures.length) {
+      void vscode.window.showWarningMessage(
+        `T-SQL Fabric: deployed with ${failures.length} error(s). First: ${failures[0]}`,
+      );
+    } else {
+      void vscode.window.showInformationMessage(
+        `T-SQL Fabric: deployed ${procFiles.length} procedure(s) and ${nbFiles.length} notebook(s).`,
+      );
+    }
+  } catch (err) {
+    reportError(err);
+  }
+}
+
 // Minimal shape of the built-in Git extension API (vscode.git) we use.
 interface GitRef {
   name?: string;
   upstream?: unknown;
 }
+interface GitRemoteRef {
+  name: string;
+  fetchUrl?: string;
+  pushUrl?: string;
+}
 interface GitRepository {
   rootUri: vscode.Uri;
-  state: { HEAD?: GitRef };
+  state: { HEAD?: GitRef; remotes?: GitRemoteRef[] };
   add(paths: string[]): Promise<void>;
   commit(message: string): Promise<void>;
   push(remote?: string, branch?: string, setUpstream?: boolean): Promise<void>;
@@ -1238,6 +1437,154 @@ async function uploadToGit(): Promise<void> {
       /nothing to commit|no changes|clean/i.test(msg)
         ? "T-SQL Fabric: nothing new to commit in the Fabric folder."
         : `T-SQL Fabric: Git upload failed — ${msg}`,
+    );
+  }
+}
+
+// Resolve a token for the provider: GitHub.com via the built-in GitHub auth
+// (no manual PAT); everyone else via SecretStorage (prompted once). Never a
+// setting.
+async function providerToken(
+  context: vscode.ExtensionContext,
+  remote: GitRemote,
+): Promise<string | undefined> {
+  if (remote.provider === "github" && remote.host === "github.com") {
+    const s = await vscode.authentication.getSession("github", ["repo"], {
+      createIfNone: true,
+    });
+    return s?.accessToken;
+  }
+  const key = `tsqlFabric.pat.${remote.provider}.${remote.host}`;
+  let token = await context.secrets.get(key);
+  if (!token) {
+    token = await vscode.window.showInputBox({
+      prompt: `Personal Access Token for ${remote.provider} (${remote.host}) — stored securely`,
+      password: true,
+      ignoreFocusOut: true,
+    });
+    if (token) {
+      await context.secrets.store(key, token);
+    }
+  }
+  return token || undefined;
+}
+
+// Create a PR/MR for the current branch → base, via the provider's API
+// (GitHub/GitLab/Bitbucket); Azure DevOps / unknown fall back to the browser.
+async function createPullRequest(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  const ws = vscode.workspace.workspaceFolders?.[0];
+  const api = ws ? await gitApi() : undefined;
+  const repo = api?.getRepository(ws!.uri) ?? api?.repositories[0];
+  if (!repo) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a Git repository first.",
+    );
+    return;
+  }
+  const head = repo.state.HEAD?.name;
+  const base = vscode.workspace
+    .getConfiguration("tsqlFabric")
+    .get<string>("git.baseBranch", "main");
+  if (!head) {
+    void vscode.window.showErrorMessage("T-SQL Fabric: no current Git branch.");
+    return;
+  }
+  if (head === base) {
+    void vscode.window.showErrorMessage(
+      `T-SQL Fabric: you're on "${base}". Create a feature branch (and push it) first.`,
+    );
+    return;
+  }
+  const remotes = repo.state.remotes ?? [];
+  const url =
+    remotes.find((r) => r.name === "origin")?.pushUrl ??
+    remotes[0]?.pushUrl ??
+    remotes[0]?.fetchUrl;
+  const remote = url ? parseGitRemote(url) : undefined;
+  if (!remote) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: couldn't detect the Git remote/provider.",
+    );
+    return;
+  }
+  // Providers without API support here → open the provider's create-PR page.
+  if (!prApiEndpoint(remote)) {
+    await vscode.env.openExternal(vscode.Uri.parse(prWebUrl(remote, head, base)));
+    return;
+  }
+  const token = await providerToken(context, remote);
+  if (!token) {
+    return;
+  }
+  const title = await vscode.window.showInputBox({
+    prompt: "Pull request title",
+    value: head,
+    ignoreFocusOut: true,
+  });
+  if (!title) {
+    return;
+  }
+  const body =
+    (await vscode.window.showInputBox({
+      prompt: "Description (optional)",
+      ignoreFocusOut: true,
+    })) ?? "";
+  try {
+    const prUrl = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `T-SQL Fabric: creating PR on ${remote.provider}…`,
+      },
+      () => createPullRequestViaApi(remote, token, { title, body, head, base }),
+    );
+    const pick = await vscode.window.showInformationMessage(
+      `T-SQL Fabric: pull request created on ${remote.provider}.`,
+      "Open",
+    );
+    if (pick === "Open") {
+      await vscode.env.openExternal(vscode.Uri.parse(prUrl));
+    }
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// Store (or clear) a provider PAT in SecretStorage for the current repo's host.
+async function setProviderToken(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  const ws = vscode.workspace.workspaceFolders?.[0];
+  const api = ws ? await gitApi() : undefined;
+  const repo = api?.getRepository(ws!.uri) ?? api?.repositories[0];
+  const remotes = repo?.state.remotes ?? [];
+  const url = remotes[0]?.pushUrl ?? remotes[0]?.fetchUrl;
+  const remote = url ? parseGitRemote(url) : undefined;
+  if (!remote) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a Git repository with a remote first.",
+    );
+    return;
+  }
+  const token = await vscode.window.showInputBox({
+    prompt: `Personal Access Token for ${remote.provider} (${remote.host}) — stored securely, never in settings`,
+    password: true,
+    ignoreFocusOut: true,
+  });
+  if (token === undefined) {
+    return;
+  }
+  const key = `tsqlFabric.pat.${remote.provider}.${remote.host}`;
+  if (token) {
+    await context.secrets.store(key, token);
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: token saved for ${remote.host}.`,
+    );
+  } else {
+    await context.secrets.delete(key);
+    void vscode.window.showInformationMessage(
+      `T-SQL Fabric: token cleared for ${remote.host}.`,
     );
   }
 }
