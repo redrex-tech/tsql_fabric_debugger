@@ -21,6 +21,8 @@ import {
   readNotebookLink,
   stripNotebookLink,
   commentPrefixFor,
+  normalizeSql,
+  normalizeText,
   parseGitRemote,
   prApiEndpoint,
   prWebUrl,
@@ -40,6 +42,8 @@ import {
   fetchProcedureSource,
   fetchAllSources,
   deployProcedure,
+  checkProcedureRunning,
+  type RunningRequest,
   createPullRequestViaApi,
   killOrphanSessions,
   getToken,
@@ -123,7 +127,10 @@ export function activate(context: vscode.ExtensionContext): void {
       "tsqlFabric.openProcedureSource",
       openProcedureSource,
     ),
-    vscode.commands.registerCommand("tsqlFabric.exportForFabric", exportForFabric),
+    vscode.commands.registerCommand(
+      "tsqlFabric.exportForFabric",
+      exportForFabric,
+    ),
     vscode.commands.registerCommand(
       "tsqlFabric.deployProcedure",
       deployProcedureToFabric,
@@ -156,7 +163,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("tsqlFabric.switchWarehouse", () =>
       switchWarehouse(context, status, fabricProvider, proceduresProvider),
     ),
-    vscode.commands.registerCommand("tsqlFabric.checkSetup", () => checkSetup()),
+    vscode.commands.registerCommand("tsqlFabric.checkSetup", () =>
+      checkSetup(),
+    ),
     vscode.commands.registerCommand("tsqlFabric.killOrphans", () =>
       killOrphans(),
     ),
@@ -205,18 +214,44 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       },
     ),
+    vscode.commands.registerCommand("tsqlFabric.compareWithFabric", (arg) =>
+      compareWithFabric(arg),
+    ),
+    vscode.commands.registerCommand("tsqlFabric.checkFabricSync", () =>
+      refreshSyncStatus(),
+    ),
   );
+
+  // Sync-status badges on local Fabric-folder files (in sync ✓ / differs ≠ / +).
+  context.subscriptions.push(
+    vscode.window.registerFileDecorationProvider(syncDecorations),
+    vscode.workspace.registerTextDocumentContentProvider(
+      "tsqlfabric-cloud",
+      new CloudContentProvider(),
+    ),
+    // Recompute a file's badge when you save it, so it stays live while editing.
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      void refreshOneFile(doc.uri);
+    }),
+  );
+  void refreshSyncStatus(); // initial pass (no-op until connected)
 
   // Inline values: show @variable values next to the code while stopped.
   context.subscriptions.push(
     vscode.languages.registerInlineValuesProvider("sql", {
       provideInlineValues(document, viewport) {
         const out: vscode.InlineValue[] = [];
-        for (let line = viewport.start.line; line <= viewport.end.line; line++) {
+        for (
+          let line = viewport.start.line;
+          line <= viewport.end.line;
+          line++
+        ) {
           const text = document.lineAt(line).text;
           for (const v of matchVariables(text)) {
             const range = new vscode.Range(line, v.start, line, v.end);
-            out.push(new vscode.InlineValueVariableLookup(range, v.name, false));
+            out.push(
+              new vscode.InlineValueVariableLookup(range, v.name, false),
+            );
           }
         }
         return out;
@@ -224,7 +259,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const watcher = vscode.workspace.createFileSystemWatcher("**/*.{sql,ipynb,py}");
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    "**/*.{sql,ipynb,py}",
+  );
   watcher.onDidCreate(() => filesProvider.refresh());
   watcher.onDidDelete(() => filesProvider.refresh());
   context.subscriptions.push(watcher);
@@ -259,16 +296,23 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       stmtLines.refresh(ed);
     }),
-    vscode.commands.registerCommand("tsqlFabric.toggleBreakpointLines", async () => {
-      const cfg = vscode.workspace.getConfiguration("tsqlFabric");
-      const current = cfg.get<string>("breakpointLineHint", "label");
-      const next = current === "off" ? "label" : "off";
-      await cfg.update("breakpointLineHint", next, vscode.ConfigurationTarget.Global);
-      stmtLines.refreshAllVisible();
-      void vscode.window.showInformationMessage(
-        `T-SQL Fabric: breakpoint-line hints ${next === "off" ? "off" : "on"} (style: ${next}).`,
-      );
-    }),
+    vscode.commands.registerCommand(
+      "tsqlFabric.toggleBreakpointLines",
+      async () => {
+        const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+        const current = cfg.get<string>("breakpointLineHint", "label");
+        const next = current === "off" ? "label" : "off";
+        await cfg.update(
+          "breakpointLineHint",
+          next,
+          vscode.ConfigurationTarget.Global,
+        );
+        stmtLines.refreshAllVisible();
+        void vscode.window.showInformationMessage(
+          `T-SQL Fabric: breakpoint-line hints ${next === "off" ? "off" : "on"} (style: ${next}).`,
+        );
+      },
+    ),
   );
 
   // Warm the database token in the background when a warehouse is already
@@ -378,7 +422,9 @@ class StatementLineDecorator {
           .map((n) =>
             // label sits at end of line; bar spans the whole line
             style === "label"
-              ? doc.lineAt(n - 1).range.with({ start: doc.lineAt(n - 1).range.end })
+              ? doc
+                  .lineAt(n - 1)
+                  .range.with({ start: doc.lineAt(n - 1).range.end })
               : new vscode.Range(n - 1, 0, n - 1, 0),
           );
         for (const ed of vscode.window.visibleTextEditors) {
@@ -680,7 +726,10 @@ function saveConnection(
   const rest = all.filter(
     (c) => !(c.server === conn.server && c.database === conn.database),
   );
-  void context.globalState.update(CONNECTIONS_KEY, [conn, ...rest].slice(0, 20));
+  void context.globalState.update(
+    CONNECTIONS_KEY,
+    [conn, ...rest].slice(0, 20),
+  );
 }
 
 async function switchWarehouse(
@@ -690,9 +739,12 @@ async function switchWarehouse(
   proceduresProvider: ProceduresProvider,
 ): Promise<void> {
   const saved = context.globalState.get<SavedConnection[]>(CONNECTIONS_KEY, []);
-  const items: (vscode.QuickPickItem & { conn?: SavedConnection })[] = saved.map(
-    (c) => ({ label: c.label, detail: `${c.database} — ${c.server}`, conn: c }),
-  );
+  const items: (vscode.QuickPickItem & { conn?: SavedConnection })[] =
+    saved.map((c) => ({
+      label: c.label,
+      detail: `${c.database} — ${c.server}`,
+      conn: c,
+    }));
   items.push({
     label: "$(plug) Connect to a new warehouse…",
     conn: undefined,
@@ -705,11 +757,20 @@ async function switchWarehouse(
     return;
   }
   if (!pick.conn) {
-    await connectToWarehouse(context, status, fabricProvider, proceduresProvider);
+    await connectToWarehouse(
+      context,
+      status,
+      fabricProvider,
+      proceduresProvider,
+    );
     return;
   }
   const cfg = vscode.workspace.getConfiguration("tsqlFabric");
-  await cfg.update("server", pick.conn.server, vscode.ConfigurationTarget.Global);
+  await cfg.update(
+    "server",
+    pick.conn.server,
+    vscode.ConfigurationTarget.Global,
+  );
   await cfg.update(
     "database",
     pick.conn.database,
@@ -1140,18 +1201,65 @@ async function deployProcedureToFabric(
     );
   }
   const ddl = toCreateOrAlter(sqlText);
+  const pn = parseProcName(sqlText);
+  const label = pn ? `${pn.schema}.${pn.name}` : "this procedure";
   const isProd = isProductionTarget(
     server,
     database,
     cfg.get<string[]>("productionWarehouses") ?? [],
   );
+  // Pre-deploy safety: is the procedure running right now? CREATE OR ALTER
+  // needs a schema lock, so deploying over a live execution blocks on that lock
+  // (or would replace the object mid-flight). Best-effort — if we can't verify
+  // (DMV/permission), fall through to the normal confirmation.
+  let running: RunningRequest[] = [];
+  if (pn) {
+    try {
+      running = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Window,
+          title: `T-SQL Fabric: checking if ${label} is running…`,
+        },
+        () =>
+          checkProcedureRunning(
+            resolvePython(),
+            server,
+            database,
+            `${pn.schema}.${pn.name}`,
+          ),
+      );
+    } catch {
+      // couldn't verify — proceed to the normal confirmation below
+    }
+  }
+  let detail =
+    "This runs CREATE OR ALTER on the warehouse — a committed write.";
+  let confirmLabel = "Deploy";
+  if (running.length) {
+    const lines = running
+      .slice(0, 5)
+      .map(
+        (r) =>
+          `• session ${r.session_id} (${r.login || "?"}, ${r.status}) — ${(
+            r.text || ""
+          )
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 80)}`,
+      )
+      .join("\n");
+    const more = running.length > 5 ? `\n…and ${running.length - 5} more` : "";
+    detail =
+      `⚠ ${label} appears to be RUNNING right now — ${running.length} active request(s):\n${lines}${more}\n\n` +
+      "Deploying takes a schema lock: it may block until these finish, or replace the procedure mid-execution. Deploy anyway?";
+    confirmLabel = "Deploy anyway";
+  }
   const go = await vscode.window.showWarningMessage(
-    `⚠ Deploy this procedure to "${database}"${isProd ? " (PRODUCTION)" : ""}? ` +
-      "This runs CREATE OR ALTER on the warehouse — a committed write.",
-    { modal: true },
-    "Deploy",
+    `Deploy ${label} to "${database}"${isProd ? " (PRODUCTION)" : ""}?`,
+    { modal: true, detail },
+    confirmLabel,
   );
-  if (go !== "Deploy") {
+  if (go !== confirmLabel) {
     return;
   }
   try {
@@ -1165,15 +1273,14 @@ async function deployProcedureToFabric(
     void vscode.window.showInformationMessage(
       `T-SQL Fabric: deployed to ${database} (${r.batches ?? 1} batch(es)).`,
     );
+    void refreshSyncStatus(); // the local copy now matches the cloud
   } catch (err) {
     reportError(err);
   }
 }
 
 // Bidirectional sync between the warehouse and the local repo folder.
-async function syncWithFabric(
-  context: vscode.ExtensionContext,
-): Promise<void> {
+async function syncWithFabric(context: vscode.ExtensionContext): Promise<void> {
   const cfg = vscode.workspace.getConfiguration("tsqlFabric");
   const server = cfg.get<string>("server");
   const database = cfg.get<string>("database");
@@ -1192,12 +1299,14 @@ async function syncWithFabric(
     [
       {
         label: "$(cloud-download) Pull from Fabric → repo",
-        detail: "Download all procedures and notebooks into the folder (read-only).",
+        detail:
+          "Download all procedures and notebooks into the folder (read-only).",
         dir: "pull" as const,
       },
       {
         label: "$(rocket) Deploy repo → Fabric",
-        detail: "Publish the folder's procedures and notebooks to the warehouse (writes).",
+        detail:
+          "Publish the folder's procedures and notebooks to the warehouse (writes).",
         dir: "deploy" as const,
       },
     ],
@@ -1252,7 +1361,11 @@ async function syncWithFabric(
                 commentPrefixFor(ext),
               );
               const safe = nb.displayName.replace(/[^\w.\- ]+/g, "_");
-              const file = vscode.Uri.joinPath(dir, "notebooks", `${safe}.${ext}`);
+              const file = vscode.Uri.joinPath(
+                dir,
+                "notebooks",
+                `${safe}.${ext}`,
+              );
               await vscode.workspace.fs.createDirectory(
                 vscode.Uri.joinPath(file, ".."),
               );
@@ -1269,6 +1382,7 @@ async function syncWithFabric(
       void vscode.window.showInformationMessage(
         `T-SQL Fabric: pulled ${procs} procedure(s) and ${nbs} notebook(s).`,
       );
+      void refreshSyncStatus(); // freshly pulled files are in sync
       return;
     }
 
@@ -1312,7 +1426,9 @@ async function syncWithFabric(
         for (const f of procFiles) {
           try {
             const sql = toCreateOrAlter(
-              Buffer.from(await vscode.workspace.fs.readFile(f)).toString("utf8"),
+              Buffer.from(await vscode.workspace.fs.readFile(f)).toString(
+                "utf8",
+              ),
             );
             await deployProcedure(python, server, database, sql);
           } catch (e) {
@@ -1350,6 +1466,7 @@ async function syncWithFabric(
         `T-SQL Fabric: deployed ${procFiles.length} procedure(s) and ${nbFiles.length} notebook(s).`,
       );
     }
+    void refreshSyncStatus();
   } catch (err) {
     reportError(err);
   }
@@ -1526,7 +1643,9 @@ async function createPullRequest(
   }
   // Providers without API support here → open the provider's create-PR page.
   if (!prApiEndpoint(remote)) {
-    await vscode.env.openExternal(vscode.Uri.parse(prWebUrl(remote, head, base)));
+    await vscode.env.openExternal(
+      vscode.Uri.parse(prWebUrl(remote, head, base)),
+    );
     return;
   }
   const token = await providerToken(context, remote);
@@ -1601,6 +1720,248 @@ async function setProviderToken(
     void vscode.window.showInformationMessage(
       `T-SQL Fabric: token cleared for ${remote.host}.`,
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync status: badge local Fabric-folder files vs their cloud version, so you
+// don't push a stale/divergent copy. In sync (✓) / differs (≠) / local-only (+).
+// ---------------------------------------------------------------------------
+type SyncState = "sync" | "diff" | "local-only";
+const syncCache = new Map<string, SyncState>(); // uri.toString() → state
+
+class FabricSyncDecorations implements vscode.FileDecorationProvider {
+  private readonly _e = new vscode.EventEmitter<vscode.Uri | vscode.Uri[]>();
+  readonly onDidChangeFileDecorations = this._e.event;
+  fire(uris: vscode.Uri[]): void {
+    this._e.fire(uris);
+  }
+  provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+    switch (syncCache.get(uri.toString())) {
+      case "diff":
+        return {
+          badge: "≠",
+          tooltip:
+            "T-SQL Fabric: differs from the cloud — deploy or pull to reconcile",
+          color: new vscode.ThemeColor(
+            "gitDecoration.modifiedResourceForeground",
+          ),
+        };
+      case "sync":
+        return {
+          badge: "✓",
+          tooltip: "T-SQL Fabric: in sync with the cloud",
+          color: new vscode.ThemeColor(
+            "gitDecoration.ignoredResourceForeground",
+          ),
+        };
+      case "local-only":
+        return {
+          badge: "+",
+          tooltip: "T-SQL Fabric: not on the cloud (local only)",
+          color: new vscode.ThemeColor("gitDecoration.addedResourceForeground"),
+        };
+      default:
+        return undefined;
+    }
+  }
+}
+const syncDecorations = new FabricSyncDecorations();
+
+async function readText(uri: vscode.Uri): Promise<string> {
+  return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+}
+
+// Compute the sync state of one local file against the cloud (1 network call).
+async function computeFileState(
+  uri: vscode.Uri,
+  server: string,
+  database: string,
+): Promise<SyncState> {
+  const local = await readText(uri);
+  const id = readNotebookLink(local);
+  if (id) {
+    try {
+      const { content } = await getNotebookSource(
+        await getToken(),
+        id.workspaceId,
+        id.itemId,
+      );
+      return normalizeText(stripNotebookLink(local)) === normalizeText(content)
+        ? "sync"
+        : "diff";
+    } catch {
+      return "local-only";
+    }
+  }
+  const pn = parseProcName(local);
+  if (!pn) {
+    return "local-only";
+  }
+  try {
+    const cloud = await fetchProcedureSource(
+      resolvePython(),
+      server,
+      database,
+      `${pn.schema}.${pn.name}`,
+    );
+    return normalizeSql(local) === normalizeSql(cloud) ? "sync" : "diff";
+  } catch {
+    return "local-only";
+  }
+}
+
+// Recompute the badges for every Fabric-folder file (procedures via one batch).
+async function refreshSyncStatus(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  const dir = localFabricDir();
+  if (!server || !database || !dir) {
+    return;
+  }
+  const folder = cfg.get<string>("localFolder", "fabric");
+  const exclude = "**/{node_modules,.venv,.git,dist,__pycache__}/**";
+  const procFiles = await vscode.workspace.findFiles(
+    `${folder}/procedures/**/*.sql`,
+    exclude,
+  );
+  const nbFiles = await vscode.workspace.findFiles(
+    `${folder}/notebooks/**/*.{py,sql,scala,r}`,
+    exclude,
+  );
+  if (procFiles.length + nbFiles.length === 0) {
+    return;
+  }
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Window,
+      title: "T-SQL Fabric: checking sync…",
+    },
+    async () => {
+      const changed: vscode.Uri[] = [];
+      // procedures — fetch all cloud sources once
+      if (procFiles.length) {
+        const cloud = new Map<string, string>();
+        for (const p of await fetchAllSources(
+          resolvePython(),
+          server,
+          database,
+        )) {
+          if (p.source) {
+            cloud.set(
+              `${p.schema}.${p.name}`.toLowerCase(),
+              normalizeSql(p.source),
+            );
+          }
+        }
+        for (const f of procFiles) {
+          const local = await readText(f);
+          const pn = parseProcName(local);
+          const key = pn ? `${pn.schema}.${pn.name}`.toLowerCase() : "";
+          const state: SyncState =
+            !pn || !cloud.has(key)
+              ? "local-only"
+              : normalizeSql(local) === cloud.get(key)
+                ? "sync"
+                : "diff";
+          syncCache.set(f.toString(), state);
+          changed.push(f);
+        }
+      }
+      // notebooks — one call each (bounded by how many you pulled locally)
+      for (const f of nbFiles) {
+        syncCache.set(
+          f.toString(),
+          await computeFileState(f, server, database),
+        );
+        changed.push(f);
+      }
+      syncDecorations.fire(changed);
+    },
+  );
+}
+
+// Recompute a single file (used on save, so badges stay live while you edit).
+async function refreshOneFile(uri: vscode.Uri): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  const dir = localFabricDir();
+  if (!server || !database || !dir) {
+    return;
+  }
+  if (!uri.toString().startsWith(dir.toString())) {
+    return; // not a Fabric-folder file
+  }
+  syncCache.set(uri.toString(), await computeFileState(uri, server, database));
+  syncDecorations.fire([uri]);
+}
+
+// Open a side-by-side diff of a local Fabric file against the cloud version.
+const cloudDocs = new Map<string, string>(); // virtual uri → cloud content
+class CloudContentProvider implements vscode.TextDocumentContentProvider {
+  provideTextDocumentContent(uri: vscode.Uri): string {
+    return cloudDocs.get(uri.toString()) ?? "";
+  }
+}
+
+async function compareWithFabric(arg?: vscode.Uri | FileNode): Promise<void> {
+  const uri =
+    arg instanceof vscode.Uri
+      ? arg
+      : (arg?.resourceUri ?? vscode.window.activeTextEditor?.document.uri);
+  const cfg = vscode.workspace.getConfiguration("tsqlFabric");
+  const server = cfg.get<string>("server");
+  const database = cfg.get<string>("database");
+  if (!uri || !server || !database) {
+    void vscode.window.showErrorMessage(
+      "T-SQL Fabric: open a linked file and connect to a warehouse first.",
+    );
+    return;
+  }
+  try {
+    const local = await readText(uri);
+    const id = readNotebookLink(local);
+    let cloud: string;
+    if (id) {
+      const { content, ext } = await getNotebookSource(
+        await getToken(),
+        id.workspaceId,
+        id.itemId,
+      );
+      // stamp the same link on the cloud side so only real changes show
+      cloud = stampNotebookLink(content, id, commentPrefixFor(ext));
+    } else {
+      const pn = parseProcName(local);
+      if (!pn) {
+        void vscode.window.showErrorMessage(
+          "T-SQL Fabric: not a linked notebook or a CREATE PROCEDURE.",
+        );
+        return;
+      }
+      cloud = toCreateOrAlter(
+        await fetchProcedureSource(
+          resolvePython(),
+          server,
+          database,
+          `${pn.schema}.${pn.name}`,
+        ),
+      );
+    }
+    const cloudUri = uri.with({
+      scheme: "tsqlfabric-cloud",
+      query: `${Date.now()}`,
+    });
+    cloudDocs.set(cloudUri.toString(), cloud);
+    await vscode.commands.executeCommand(
+      "vscode.diff",
+      cloudUri,
+      uri,
+      `Fabric (cloud) ↔ ${uriBasename(uri)} (local)`,
+    );
+  } catch (err) {
+    reportError(err);
   }
 }
 
@@ -1748,9 +2109,7 @@ async function ensureValue(
 // ---------------------------------------------------------------------------
 // Adapter: how to start the DAP server for a session.
 // ---------------------------------------------------------------------------
-class TsqlFabricAdapterFactory
-  implements vscode.DebugAdapterDescriptorFactory
-{
+class TsqlFabricAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
   async createDebugAdapterDescriptor(
     _session: vscode.DebugSession,
     _executable: vscode.DebugAdapterExecutable | undefined,
@@ -1892,7 +2251,6 @@ async function promptForParams(
   return values;
 }
 
-
 // ---------------------------------------------------------------------------
 // Sidebar: the connected warehouse's deployed procedures, grouped by schema.
 // Click one to start a debug session (via procName).
@@ -1963,8 +2321,7 @@ class ProceduresProvider implements vscode.TreeDataProvider<ProcNode> {
       return procs
         .filter((p) => p.schema === element.label)
         .map(
-          (p) =>
-            new ProcNode(p.name, vscode.TreeItemCollapsibleState.None, p),
+          (p) => new ProcNode(p.name, vscode.TreeItemCollapsibleState.None, p),
         );
     }
     const schemas = [...new Set(procs.map((p) => p.schema))].sort();
@@ -2139,9 +2496,7 @@ class NotebookNode extends vscode.TreeItem {
   }
 }
 
-class FabricWorkspaceProvider
-  implements vscode.TreeDataProvider<NotebookNode>
-{
+class FabricWorkspaceProvider implements vscode.TreeDataProvider<NotebookNode> {
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
   private _gen = 0; // bumped on refresh to discard in-flight discovery
@@ -2185,7 +2540,9 @@ class FabricWorkspaceProvider
         }
       }
       if (!wsId) {
-        return [new NotebookNode("Not connected — run “Connect to Warehouse”.")];
+        return [
+          new NotebookNode("Not connected — run “Connect to Warehouse”."),
+        ];
       }
       const notebooks = await listNotebooks(token, wsId);
       if (notebooks.length === 0) {

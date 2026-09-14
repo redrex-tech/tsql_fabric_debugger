@@ -67,6 +67,46 @@ def list_parameters(proc_name, server=None, database=None, lock_timeout=30):
     return [{"name": r[0], "type": r[1], "mode": r[2]} for r in rows]
 
 
+def running_executions(proc_name, server=None, database=None, lock_timeout=30):
+    """Active requests whose live SQL text mentions this procedure.
+
+    A pre-deploy safety check: ``CREATE OR ALTER`` needs a schema lock, so
+    deploying while the procedure is running blocks on that lock (or would
+    replace the object mid-execution). This reads ``sys.dm_exec_requests``
+    joined to ``sys.dm_exec_sessions``, with the running batch text from
+    ``sys.dm_exec_sql_text``, and returns the requests whose text references the
+    procedure name (this session excluded). Read-only, short-lived, autocommit;
+    a short lock_timeout keeps it from hanging behind a schema lock.
+
+    The text match is a heuristic — a nested EXEC, a comment, or another
+    session's CREATE of the same name can match — so tooling surfaces the rows
+    for the user to judge rather than hard-blocking. proc_name is "schema.proc"
+    (bracketed identifiers accepted); only the object name is matched, so a
+    caller in another schema still shows up. Returns
+    [{"session_id", "login", "program", "status", "start_time", "text"}].
+    """
+    parts = [p.strip().strip("[]") for p in proc_name.split(".")]
+    name = parts[-1] if parts and parts[-1] else proc_name
+    conn = connect(server, database, autocommit=True, lock_timeout=lock_timeout)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT r.session_id, s.login_name, s.program_name, r.status, "
+            "       r.start_time, LEFT(t.text, 400) "
+            "FROM sys.dm_exec_requests r "
+            "JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id "
+            "CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t "
+            "WHERE r.session_id <> @@SPID AND t.text LIKE ?;",
+            (f"%{name}%",))
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [{"session_id": r[0], "login": r[1], "program": r[2],
+             "status": r[3],
+             "start_time": str(r[4]) if r[4] is not None else None,
+             "text": r[5]} for r in rows]
+
+
 def steppable_lines(sql_text):
     """Line numbers a breakpoint can actually pause on for this procedure.
 
@@ -169,7 +209,7 @@ def main(argv=None):
     ap.add_argument("what",
                     choices=["procedures", "parameters", "kill-orphans",
                              "steppable-lines", "fetch-source",
-                             "fetch-all-sources", "deploy"],
+                             "fetch-all-sources", "running", "deploy"],
                     help="what to list, the orphan-session janitor, the "
                          "breakpoint-able lines of a .sql (offline), a deployed "
                          "procedure's source, or deploy a .sql (COMMITS)")
@@ -201,6 +241,11 @@ def main(argv=None):
         elif args.what == "fetch-all-sources":
             result = fetch_all_sources(args.server, args.database,
                                        args.lock_timeout)
+        elif args.what == "running":
+            if not args.proc:
+                raise ValueError("--proc is required for running")
+            result = {"running": running_executions(
+                args.proc, args.server, args.database, args.lock_timeout)}
         elif args.what == "deploy":
             sql = (open(args.file, encoding="utf-8", errors="replace").read()
                    if args.file else sys.stdin.read())

@@ -247,7 +247,10 @@ function nbSource(lines: string[]): string[] {
 // in the warehouse — a CREATE OR ALTER, safe to re-run. The T-SQL is kept
 // visible in the cell as a triple-quoted string; the user fills SERVER/DATABASE
 // and runs it in Fabric. Returns the .ipynb JSON.
-export function buildDeployNotebook(sqlText: string, procLabel: string): string {
+export function buildDeployNotebook(
+  sqlText: string,
+  procLabel: string,
+): string {
   const ddl = toCreateOrAlter(sqlText)
     .replace(/\\/g, "\\\\")
     .replace(/"""/g, '\\"\\"\\"');
@@ -364,11 +367,7 @@ export function stripNotebookLink(source: string): string {
 // and fetch live in the extension.
 // ---------------------------------------------------------------------------
 export type GitProvider =
-  | "github"
-  | "gitlab"
-  | "bitbucket"
-  | "azure-devops"
-  | "unknown";
+  "github" | "gitlab" | "bitbucket" | "azure-devops" | "unknown";
 
 export interface GitRemote {
   provider: GitProvider;
@@ -509,4 +508,24 @@ export function prWebUrl(r: GitRemote, head: string, base: string): string {
     default:
       return "";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sync status: normalize before comparing local vs cloud, so Fabric's
+// re-formatting on save doesn't read as a difference. Pure.
+// ---------------------------------------------------------------------------
+
+// T-SQL is whitespace-insensitive: normalize CREATE→CREATE OR ALTER and collapse
+// all runs of whitespace, so only real token changes count as a difference.
+export function normalizeSql(sql: string): string {
+  return toCreateOrAlter(sql).replace(/\s+/g, " ").trim();
+}
+
+// Notebook sources (Python indentation is significant): only normalize line
+// endings and trailing whitespace; keep internal indentation.
+export function normalizeText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/^\n+|\n+$/g, "");
 }

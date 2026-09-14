@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.5 — 2026-09-14
+
+- **`running` (introspection)**: `... introspect running --proc schema.name`
+  lists the active requests whose live SQL text references a procedure — reading
+  `sys.dm_exec_requests` joined to `sys.dm_exec_sessions` with the running batch
+  text from `sys.dm_exec_sql_text` (this session excluded). Read-only,
+  short-lived, autocommit. A pre-deploy safety check: `CREATE OR ALTER` needs a
+  schema lock, so deploying over a live execution blocks (or replaces the object
+  mid-flight). The VS Code deploy button uses it to warn before deploying. The
+  text match is a heuristic (a nested EXEC or comment can match), so callers
+  surface the rows for the user to judge rather than hard-blocking.
+
 ## 0.3.4 — 2026-09-10
 
 - **`deploy` (introspection)**: `... introspect deploy [--file f]` (or stdin)

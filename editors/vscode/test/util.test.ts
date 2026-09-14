@@ -13,6 +13,8 @@ import {
   readNotebookLink,
   stripNotebookLink,
   commentPrefixFor,
+  normalizeSql,
+  normalizeText,
   parseGitRemote,
   prApiEndpoint,
   prApiBody,
@@ -91,7 +93,11 @@ describe("parseIntrospectResult", () => {
   });
 
   it("returns the {error} from stdout even on non-zero exit", () => {
-    const r = parseIntrospectResult('{"error":"Login timeout"}', true, "runpy warning");
+    const r = parseIntrospectResult(
+      '{"error":"Login timeout"}',
+      true,
+      "runpy warning",
+    );
     expect(r).toEqual({ error: "Login timeout" });
   });
 
@@ -117,17 +123,23 @@ describe("parseIntrospectResult", () => {
   });
 
   it("does not treat a plain array (no error key) as an error", () => {
-    expect(parseIntrospectResult("[1,2,3]", false, "")).toEqual({ ok: [1, 2, 3] });
+    expect(parseIntrospectResult("[1,2,3]", false, "")).toEqual({
+      ok: [1, 2, 3],
+    });
   });
 
   it("trims the stderr error message", () => {
-    expect(parseIntrospectResult("x", true, "  boom  ")).toEqual({ error: "boom" });
+    expect(parseIntrospectResult("x", true, "  boom  ")).toEqual({
+      error: "boom",
+    });
   });
 
   it("truncates unexpected output to 200 chars", () => {
     const long = "z".repeat(250);
     const r = parseIntrospectResult(long, false, "");
-    expect("error" in r && r.error).toBe(`unexpected output: ${"z".repeat(200)}`);
+    expect("error" in r && r.error).toBe(
+      `unexpected output: ${"z".repeat(200)}`,
+    );
   });
 });
 
@@ -182,18 +194,28 @@ describe("isProductionTarget", () => {
     expect(isProductionTarget("srv", "db", [])).toBe(false);
   });
   it("matches any one of several patterns", () => {
-    expect(isProductionTarget("srv", "staging", ["prod", "staging"])).toBe(true);
+    expect(isProductionTarget("srv", "staging", ["prod", "staging"])).toBe(
+      true,
+    );
   });
 });
 
 describe("normalizePayload", () => {
   it("passes through the new {line, sets} shape", () => {
-    const body = { line: 5, sets: [{ columns: ["a"], rows: [[1]], truncated: false }] };
+    const body = {
+      line: 5,
+      sets: [{ columns: ["a"], rows: [[1]], truncated: false }],
+    };
     expect(normalizePayload(body)).toEqual(body);
   });
   it("wraps the legacy {line, columns, rows, truncated} shape into one set", () => {
     expect(
-      normalizePayload({ line: 3, columns: ["a", "b"], rows: [[1, 2]], truncated: true }),
+      normalizePayload({
+        line: 3,
+        columns: ["a", "b"],
+        rows: [[1, 2]],
+        truncated: true,
+      }),
     ).toEqual({
       line: 3,
       sets: [{ columns: ["a", "b"], rows: [[1, 2]], truncated: true }],
@@ -211,7 +233,10 @@ describe("normalizePayload", () => {
   });
   it("rejects a non-number line even when sets are present", () => {
     expect(
-      normalizePayload({ line: "x", sets: [{ columns: [], rows: [], truncated: false }] }),
+      normalizePayload({
+        line: "x",
+        sets: [{ columns: [], rows: [], truncated: false }],
+      }),
     ).toBeUndefined();
   });
   it("needs BOTH columns and rows for the legacy shape (not either)", () => {
@@ -251,7 +276,9 @@ describe("toCsv", () => {
     expect(csv).toBe('id,name\r\n1,Ann\r\n2,"O\'Brien, Jr"\r\n3,');
   });
   it("emits just the header for an empty result set", () => {
-    expect(toCsv({ columns: ["a", "b"], rows: [], truncated: false })).toBe("a,b");
+    expect(toCsv({ columns: ["a", "b"], rows: [], truncated: false })).toBe(
+      "a,b",
+    );
   });
 });
 
@@ -277,7 +304,9 @@ describe("toCreateOrAlter", () => {
     );
   });
   it("requires whitespace between CREATE and PROC", () => {
-    expect(toCreateOrAlter("CREATEPROCEDURE dbo.p")).toBe("CREATEPROCEDURE dbo.p");
+    expect(toCreateOrAlter("CREATEPROCEDURE dbo.p")).toBe(
+      "CREATEPROCEDURE dbo.p",
+    );
   });
   it("only rewrites the first CREATE PROCEDURE", () => {
     const s = "CREATE PROCEDURE dbo.a AS SELECT 'CREATE PROCEDURE dbo.b'";
@@ -389,16 +418,20 @@ describe("parseProcName", () => {
 
 describe("artifactPath", () => {
   it("schema-type: kind/schema/name (default)", () => {
-    expect(artifactPath("procedures", "sales", "load_orders", "schema-type")).toBe(
-      "procedures/sales/load_orders",
+    expect(
+      artifactPath("procedures", "sales", "load_orders", "schema-type"),
+    ).toBe("procedures/sales/load_orders");
+    expect(artifactPath("deploy", "dbo", "p", "schema-type")).toBe(
+      "deploy/dbo/p",
     );
-    expect(artifactPath("deploy", "dbo", "p", "schema-type")).toBe("deploy/dbo/p");
   });
   it("schema: schema/name", () => {
     expect(artifactPath("deploy", "dbo", "p", "schema")).toBe("dbo/p");
   });
   it("type: kind/schema.name", () => {
-    expect(artifactPath("procedures", "dbo", "p", "type")).toBe("procedures/dbo.p");
+    expect(artifactPath("procedures", "dbo", "p", "type")).toBe(
+      "procedures/dbo.p",
+    );
   });
   it("flat: schema.name", () => {
     expect(artifactPath("deploy", "dbo", "p", "flat")).toBe("dbo.p");
@@ -419,7 +452,11 @@ describe("notebook link (.py round-trip)", () => {
   const py = "# Fabric notebook source\n\n# CELL ****\n\nprint(1)\n";
 
   it("stamps the link on the first line, keeping the source", () => {
-    const out = stampNotebookLink(py, { workspaceId: "ws1", itemId: "it1", displayName: "nb_x" });
+    const out = stampNotebookLink(py, {
+      workspaceId: "ws1",
+      itemId: "it1",
+      displayName: "nb_x",
+    });
     expect(out.split("\n")[0]).toBe(
       '# tsqlFabric-link: {"workspaceId":"ws1","itemId":"it1","displayName":"nb_x"}',
     );
@@ -445,7 +482,10 @@ describe("notebook link (.py round-trip)", () => {
   });
 
   it("strips the link so the pushed copy is the pristine source", () => {
-    const stamped = stampNotebookLink(py, { workspaceId: "ws1", itemId: "it1" });
+    const stamped = stampNotebookLink(py, {
+      workspaceId: "ws1",
+      itemId: "it1",
+    });
     expect(stripNotebookLink(stamped)).toBe(py);
   });
 
@@ -453,39 +493,67 @@ describe("notebook link (.py round-trip)", () => {
     const once = stampNotebookLink(py, { workspaceId: "a", itemId: "b" });
     const twice = stampNotebookLink(once, { workspaceId: "c", itemId: "d" });
     expect(twice.match(/tsqlFabric-link/g)).toHaveLength(1);
-    expect(readNotebookLink(twice)).toEqual({ workspaceId: "c", itemId: "d", displayName: undefined });
+    expect(readNotebookLink(twice)).toEqual({
+      workspaceId: "c",
+      itemId: "d",
+      displayName: undefined,
+    });
   });
 });
 
 describe("parseGitRemote", () => {
   it("parses GitHub https and ssh", () => {
     expect(parseGitRemote("https://github.com/redrex-tech/tool.git")).toEqual({
-      provider: "github", host: "github.com", owner: "redrex-tech", repo: "tool",
+      provider: "github",
+      host: "github.com",
+      owner: "redrex-tech",
+      repo: "tool",
     });
     expect(parseGitRemote("git@github.com:redrex-tech/tool.git")).toEqual({
-      provider: "github", host: "github.com", owner: "redrex-tech", repo: "tool",
+      provider: "github",
+      host: "github.com",
+      owner: "redrex-tech",
+      repo: "tool",
     });
   });
   it("parses GitLab with nested groups", () => {
     expect(parseGitRemote("https://gitlab.com/group/sub/proj.git")).toEqual({
-      provider: "gitlab", host: "gitlab.com", owner: "group/sub", repo: "proj",
+      provider: "gitlab",
+      host: "gitlab.com",
+      owner: "group/sub",
+      repo: "proj",
     });
   });
   it("parses Bitbucket with credentials in URL", () => {
     expect(parseGitRemote("https://user@bitbucket.org/team/repo.git")).toEqual({
-      provider: "bitbucket", host: "bitbucket.org", owner: "team", repo: "repo",
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      owner: "team",
+      repo: "repo",
     });
   });
   it("parses Azure DevOps https (_git) and ssh (v3)", () => {
-    expect(parseGitRemote("https://dev.azure.com/org/project/_git/repo")).toEqual({
-      provider: "azure-devops", host: "dev.azure.com", owner: "org/project", repo: "repo",
+    expect(
+      parseGitRemote("https://dev.azure.com/org/project/_git/repo"),
+    ).toEqual({
+      provider: "azure-devops",
+      host: "dev.azure.com",
+      owner: "org/project",
+      repo: "repo",
     });
-    expect(parseGitRemote("git@ssh.dev.azure.com:v3/org/project/repo")).toEqual({
-      provider: "azure-devops", host: "ssh.dev.azure.com", owner: "org/project", repo: "repo",
-    });
+    expect(parseGitRemote("git@ssh.dev.azure.com:v3/org/project/repo")).toEqual(
+      {
+        provider: "azure-devops",
+        host: "ssh.dev.azure.com",
+        owner: "org/project",
+        repo: "repo",
+      },
+    );
   });
   it("detects self-hosted by host substring", () => {
-    expect(parseGitRemote("https://gitlab.mycorp.com/team/repo.git")?.provider).toBe("gitlab");
+    expect(
+      parseGitRemote("https://gitlab.mycorp.com/team/repo.git")?.provider,
+    ).toBe("gitlab");
   });
   it("returns undefined for junk", () => {
     expect(parseGitRemote("not a url")).toBeUndefined();
@@ -509,16 +577,27 @@ describe("PR API builders", () => {
   });
   it("GitHub Enterprise endpoint uses /api/v3", () => {
     const ghe = parseGitRemote("https://github.mycorp.com/o/r.git")!;
-    expect(prApiEndpoint(ghe)).toBe("https://github.mycorp.com/api/v3/repos/o/r/pulls");
+    expect(prApiEndpoint(ghe)).toBe(
+      "https://github.mycorp.com/api/v3/repos/o/r/pulls",
+    );
   });
   it("bodies per provider", () => {
     const f = { title: "T", body: "B", head: "feat", base: "main" };
-    expect(prApiBody("github", f)).toEqual({ title: "T", body: "B", head: "feat", base: "main" });
+    expect(prApiBody("github", f)).toEqual({
+      title: "T",
+      body: "B",
+      head: "feat",
+      base: "main",
+    });
     expect(prApiBody("gitlab", f)).toEqual({
-      title: "T", description: "B", source_branch: "feat", target_branch: "main",
+      title: "T",
+      description: "B",
+      source_branch: "feat",
+      target_branch: "main",
     });
     expect(prApiBody("bitbucket", f)).toEqual({
-      title: "T", description: "B",
+      title: "T",
+      description: "B",
       source: { branch: { name: "feat" } },
       destination: { branch: { name: "main" } },
     });
@@ -526,14 +605,18 @@ describe("PR API builders", () => {
   it("parses the created URL from each response", () => {
     expect(prUrlFromResponse("github", { html_url: "u" })).toBe("u");
     expect(prUrlFromResponse("gitlab", { web_url: "u" })).toBe("u");
-    expect(prUrlFromResponse("bitbucket", { links: { html: { href: "u" } } })).toBe("u");
+    expect(
+      prUrlFromResponse("bitbucket", { links: { html: { href: "u" } } }),
+    ).toBe("u");
     expect(prUrlFromResponse("github", {})).toBeUndefined();
   });
   it("browser fallback URLs", () => {
     expect(prWebUrl(gh, "feat", "main")).toBe(
       "https://github.com/o/r/compare/main...feat?expand=1",
     );
-    expect(prWebUrl(bb, "feat", "main")).toContain("bitbucket.org/o/r/pull-requests/new");
+    expect(prWebUrl(bb, "feat", "main")).toContain(
+      "bitbucket.org/o/r/pull-requests/new",
+    );
     expect(prWebUrl(gl, "feat", "main")).toContain("/-/merge_requests/new");
   });
 });
@@ -551,7 +634,31 @@ describe("notebook link — SQL notebooks", () => {
     expect(out.split("\n")[0]).toBe(
       '-- tsqlFabric-link: {"workspaceId":"w","itemId":"i"}',
     );
-    expect(readNotebookLink(out)).toEqual({ workspaceId: "w", itemId: "i", displayName: undefined });
+    expect(readNotebookLink(out)).toEqual({
+      workspaceId: "w",
+      itemId: "i",
+      displayName: undefined,
+    });
     expect(stripNotebookLink(out)).toBe(sql);
   });
-})
+});
+
+describe("normalizeSql / normalizeText", () => {
+  it("normalizeSql ignores whitespace and CREATE vs CREATE OR ALTER", () => {
+    const a = "CREATE   PROCEDURE dbo.p\nAS\n  SELECT 1;";
+    const b = "CREATE OR ALTER PROCEDURE dbo.p AS SELECT 1;";
+    expect(normalizeSql(a)).toBe(normalizeSql(b));
+  });
+  it("normalizeSql still sees a real token change", () => {
+    expect(normalizeSql("CREATE PROC dbo.p AS SELECT 1")).not.toBe(
+      normalizeSql("CREATE PROC dbo.p AS SELECT 2"),
+    );
+  });
+  it("normalizeText keeps Python indentation but trims line endings/trailing", () => {
+    const a = "def f():\r\n    return 1   \r\n";
+    const b = "def f():\n    return 1\n";
+    expect(normalizeText(a)).toBe(normalizeText(b));
+    // indentation change IS a difference
+    expect(normalizeText("if x:\n  a")).not.toBe(normalizeText("if x:\n    a"));
+  });
+});

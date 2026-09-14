@@ -1393,6 +1393,44 @@ def test_steppable_lines_rejects_loose_script():
         steppable_lines("SELECT 1;")
 
 
+def test_running_executions_offline(fake_session):
+    """running_executions maps the DMV rows and matches on the object name."""
+    from tsql_fabric_debugger.introspect import running_executions
+    fake_session.adhoc.append((
+        "dm_exec_requests",
+        ["session_id", "login_name", "program_name", "status",
+         "start_time", "text"],
+        [(57, "user@corp", "app", "running", "2026-09-14 12:00:00",
+          "EXEC dbo.p @x=1")]))
+    result = running_executions("dbo.p", "s", "d")
+    assert result == [{
+        "session_id": 57, "login": "user@corp", "program": "app",
+        "status": "running", "start_time": "2026-09-14 12:00:00",
+        "text": "EXEC dbo.p @x=1"}]
+
+
+def test_running_executions_none(fake_session):
+    """No active request → empty list (deploy is safe)."""
+    from tsql_fabric_debugger.introspect import running_executions
+    fake_session.adhoc.append((
+        "dm_exec_requests",
+        ["session_id", "login_name", "program_name", "status",
+         "start_time", "text"],
+        []))
+    assert running_executions("dbo.p", "s", "d") == []
+
+
+def test_running_cli_requires_proc():
+    """The running CLI verb errors (JSON) without --proc."""
+    from tsql_fabric_debugger.introspect import main
+    import io
+    import contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = main(["running", "--server", "s", "--database", "d"])
+    assert rc == 1 and "error" in out.getvalue()
+
+
 def test_fetch_all_sources_offline(fake_session):
     """fetch_all_sources lists procedures and reads each definition on one session."""
     from tsql_fabric_debugger.introspect import fetch_all_sources
