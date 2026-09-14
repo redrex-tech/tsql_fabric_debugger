@@ -518,20 +518,31 @@ export async function getNotebookIpynb(
   return Buffer.from(part.payload, "base64").toString("utf8");
 }
 
-// Download a notebook's NATIVE source (notebook-content.py) — the format Fabric
-// accepts back on updateDefinition, so it round-trips (unlike .ipynb, which is
-// read-only). Git-friendly too.
+// The main content part of a notebook definition — notebook-content.<lang>
+// (py for Python, sql for Spark SQL, scala, r). Not the .platform metadata.
+function mainNotebookPart(def: FabricDefinition): DefinitionPart | undefined {
+  return (
+    def.parts?.find((p) => p.path.startsWith("notebook-content.")) ??
+    def.parts?.find((p) => p.path !== ".platform")
+  );
+}
+
+// Download a notebook's NATIVE source — the format Fabric accepts back on
+// updateDefinition, so it round-trips (unlike .ipynb, which is read-only).
+// Returns the content plus its extension (py / sql / scala / r) so it's saved
+// and re-linked correctly. Git-friendly too.
 export async function getNotebookSource(
   token: string,
   workspaceId: string,
   itemId: string,
-): Promise<string> {
+): Promise<{ content: string; ext: string }> {
   const def = await getNotebookDefinition(token, workspaceId, itemId, "");
-  const part = def.parts?.find((p) => p.path.endsWith(".py"));
+  const part = mainNotebookPart(def);
   if (!part) {
-    throw new Error("Fabric getDefinition: no .py part in the response.");
+    throw new Error("Fabric getDefinition: no notebook content in the response.");
   }
-  return Buffer.from(part.payload, "base64").toString("utf8");
+  const ext = part.path.split(".").pop() ?? "py";
+  return { content: Buffer.from(part.payload, "base64").toString("utf8"), ext };
 }
 
 // Overwrite a Fabric notebook with the given native .py source (updateDefinition,
@@ -548,9 +559,9 @@ export async function updateNotebookSource(
     "Content-Type": "application/json",
   };
   const def = await getNotebookDefinition(token, workspaceId, itemId, "");
-  const part = def.parts?.find((p) => p.path.endsWith(".py"));
+  const part = mainNotebookPart(def);
   if (!part || !def.parts) {
-    throw new Error("Fabric updateDefinition: no .py part to replace.");
+    throw new Error("Fabric updateDefinition: no notebook content to replace.");
   }
   part.payload = Buffer.from(py, "utf8").toString("base64");
   part.payloadType = "InlineBase64";

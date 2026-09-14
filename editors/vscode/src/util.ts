@@ -298,10 +298,10 @@ export function buildDeployNotebook(sqlText: string, procLabel: string): string 
 }
 
 // ---------------------------------------------------------------------------
-// Notebook round-trip: bind a local Fabric notebook source (.py — the format
-// Fabric's updateDefinition accepts) to its cloud item with a link comment on
-// the first line, so an update knows which item to overwrite (survives
-// renames/moves). Pure text transforms.
+// Notebook round-trip: bind a local Fabric notebook source (the native format
+// Fabric's updateDefinition accepts — .py for Python, .sql for Spark SQL, etc.)
+// to its cloud item with a link comment on the first line, so an update knows
+// which item to overwrite (survives renames/moves). Pure text transforms.
 // ---------------------------------------------------------------------------
 export interface NotebookIdentity {
   workspaceId: string;
@@ -309,20 +309,31 @@ export interface NotebookIdentity {
   displayName?: string;
 }
 
-const LINK_RE = /^# tsqlFabric-link: (.+)$/m;
+// The comment marker for a notebook source language: SQL uses "--", the rest
+// (Python, Scala, R) use "#".
+export function commentPrefixFor(ext: string): string {
+  return ext.toLowerCase() === "sql" ? "--" : "#";
+}
+
+// Accept either comment style, so a .py and a .sql notebook both round-trip.
+const LINK_RE = /^(?:#|--) tsqlFabric-link: (.+)$/m;
 
 // Prepend the link comment (replacing any existing one) as the first line.
-export function stampNotebookLink(py: string, id: NotebookIdentity): string {
+export function stampNotebookLink(
+  source: string,
+  id: NotebookIdentity,
+  prefix = "#",
+): string {
   const json = JSON.stringify({
     workspaceId: id.workspaceId,
     itemId: id.itemId,
     displayName: id.displayName,
   });
-  return `# tsqlFabric-link: ${json}\n${stripNotebookLink(py)}`;
+  return `${prefix} tsqlFabric-link: ${json}\n${stripNotebookLink(source)}`;
 }
 
-export function readNotebookLink(py: string): NotebookIdentity | undefined {
-  const m = py.match(LINK_RE);
+export function readNotebookLink(source: string): NotebookIdentity | undefined {
+  const m = source.match(LINK_RE);
   if (!m) {
     return undefined;
   }
@@ -343,8 +354,8 @@ export function readNotebookLink(py: string): NotebookIdentity | undefined {
 
 // Remove the link comment (and the newline it added), so the copy pushed to
 // Fabric is exactly the native source (the local file keeps the link).
-export function stripNotebookLink(py: string): string {
-  return py.replace(/^# tsqlFabric-link: .+\r?\n?/m, "");
+export function stripNotebookLink(source: string): string {
+  return source.replace(/^(?:#|--) tsqlFabric-link: .+\r?\n?/m, "");
 }
 
 // ---------------------------------------------------------------------------
