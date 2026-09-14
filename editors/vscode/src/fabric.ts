@@ -76,7 +76,14 @@ export function getDatabaseToken(azPath = "az"): Promise<string> {
   const p = new Promise<string>((resolve, reject) => {
     execFile(
       azPath,
-      ["account", "get-access-token", "--resource", DATABASE_RESOURCE, "--output", "json"],
+      [
+        "account",
+        "get-access-token",
+        "--resource",
+        DATABASE_RESOURCE,
+        "--output",
+        "json",
+      ],
       { timeout: 30000 },
       (err, stdout, stderr) => {
         if (err) {
@@ -149,7 +156,11 @@ async function runIntrospect(python: string, args: string[]): Promise<unknown> {
       ["-m", "tsql_fabric_debugger.introspect", ...args],
       { timeout: 60000, maxBuffer: 8 * 1024 * 1024, env },
       (err, stdout, stderr) => {
-        const r = parseIntrospectResult(stdout, err != null, String(stderr || err || ""));
+        const r = parseIntrospectResult(
+          stdout,
+          err != null,
+          String(stderr || err || ""),
+        );
         if ("error" in r) {
           reject(new Error(r.error));
         } else {
@@ -219,6 +230,37 @@ export async function listParameters(
     "--database",
     database,
   ])) as ProcParameter[];
+}
+
+export interface RunningRequest {
+  session_id: number;
+  login: string;
+  program: string;
+  status: string;
+  start_time: string | null;
+  text: string;
+}
+
+// Active requests whose live SQL text references this procedure — a pre-deploy
+// safety check (CREATE OR ALTER needs a schema lock, so deploying over a running
+// execution blocks or replaces it mid-flight). Read-only. Best-effort: text
+// match is a heuristic, so the caller surfaces the rows for the user to judge.
+export async function checkProcedureRunning(
+  python: string,
+  server: string,
+  database: string,
+  procName: string,
+): Promise<RunningRequest[]> {
+  const r = (await runIntrospect(python, [
+    "running",
+    "--proc",
+    procName,
+    "--server",
+    server,
+    "--database",
+    database,
+  ])) as { running?: RunningRequest[] };
+  return r.running ?? [];
 }
 
 // Deploy a T-SQL script (e.g. CREATE OR ALTER PROCEDURE) to the warehouse —
@@ -484,7 +526,10 @@ export async function getNotebookDefinition(
     { method: "POST", headers, signal },
   );
   if (resp.status === 200) {
-    return ((await resp.json()) as { definition?: FabricDefinition }).definition ?? {};
+    return (
+      ((await resp.json()) as { definition?: FabricDefinition }).definition ??
+      {}
+    );
   }
   if (resp.status === 202) {
     const location = resp.headers.get("Location");
@@ -496,7 +541,9 @@ export async function getNotebookDefinition(
     if (!res.ok) {
       throw new Error(`Fabric getDefinition result: ${res.status}`);
     }
-    return ((await res.json()) as { definition?: FabricDefinition }).definition ?? {};
+    return (
+      ((await res.json()) as { definition?: FabricDefinition }).definition ?? {}
+    );
   }
   throw new Error(
     `Fabric getDefinition: ${resp.status} ${(await resp.text()).slice(0, 200)}`,
@@ -510,7 +557,13 @@ export async function getNotebookIpynb(
   itemId: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const def = await getNotebookDefinition(token, workspaceId, itemId, "ipynb", signal);
+  const def = await getNotebookDefinition(
+    token,
+    workspaceId,
+    itemId,
+    "ipynb",
+    signal,
+  );
   const part = def.parts?.find((p) => p.path.endsWith(".ipynb"));
   if (!part) {
     throw new Error("Fabric getDefinition: no .ipynb part in the response.");
@@ -539,7 +592,9 @@ export async function getNotebookSource(
   const def = await getNotebookDefinition(token, workspaceId, itemId, "");
   const part = mainNotebookPart(def);
   if (!part) {
-    throw new Error("Fabric getDefinition: no notebook content in the response.");
+    throw new Error(
+      "Fabric getDefinition: no notebook content in the response.",
+    );
   }
   const ext = part.path.split(".").pop() ?? "py";
   return { content: Buffer.from(part.payload, "base64").toString("utf8"), ext };

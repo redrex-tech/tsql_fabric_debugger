@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0 — preview
+
+- **Sync status badges + cloud diff.** Files under the Fabric folder in
+  **Project Files** now carry a git-style badge showing whether they match the
+  cloud: **✓** in sync, **≠** differs, **+** local-only (not on Fabric). The
+  comparison is *normalized* — Fabric re-formats a procedure on save
+  (whitespace/indentation) and `CREATE` becomes `CREATE OR ALTER`, so only a
+  real code change reads as "differs". New inline **Compare with Fabric**
+  (`$(git-compare)`) opens a side-by-side diff of the local file against the
+  live cloud version; a **Check sync with Fabric** (`$(cloud)`) button in the
+  view title recomputes every badge. Badges refresh automatically on save and
+  after a pull/deploy. So you never push a stale or divergent copy.
+
+- **Deploy checks if the procedure is running first.** The **Deploy to Fabric**
+  button now checks, before running `CREATE OR ALTER`, whether the procedure is
+  executing right now (active requests referencing it, via
+  `sys.dm_exec_requests`). If it is, the confirmation lists the live sessions and
+  asks *Deploy anyway?* — because the deploy takes a schema lock and would block
+  until they finish, or replace the procedure mid-execution. Best-effort: if it
+  can't verify, it falls through to the normal confirmation. Requires the library
+  ≥ 0.3.5 (adds the `running` introspection verb).
+
+
 ## 0.4.1 — preview
 
 - **Fix: non-Python notebooks** (Spark SQL / Scala / R). *Save Notebook to
