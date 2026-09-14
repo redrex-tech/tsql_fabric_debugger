@@ -12,6 +12,7 @@ import {
   stampNotebookLink,
   readNotebookLink,
   stripNotebookLink,
+  commentPrefixFor,
   parseGitRemote,
   prApiEndpoint,
   prApiBody,
@@ -536,3 +537,21 @@ describe("PR API builders", () => {
     expect(prWebUrl(gl, "feat", "main")).toContain("/-/merge_requests/new");
   });
 });
+
+describe("notebook link — SQL notebooks", () => {
+  it("commentPrefixFor: -- for sql, # otherwise", () => {
+    expect(commentPrefixFor("sql")).toBe("--");
+    expect(commentPrefixFor("SQL")).toBe("--");
+    expect(commentPrefixFor("py")).toBe("#");
+    expect(commentPrefixFor("scala")).toBe("#");
+  });
+  it("stamps and reads a -- link for a Spark SQL notebook", () => {
+    const sql = "-- Fabric notebook source\nSELECT 1;\n";
+    const out = stampNotebookLink(sql, { workspaceId: "w", itemId: "i" }, "--");
+    expect(out.split("\n")[0]).toBe(
+      '-- tsqlFabric-link: {"workspaceId":"w","itemId":"i"}',
+    );
+    expect(readNotebookLink(out)).toEqual({ workspaceId: "w", itemId: "i", displayName: undefined });
+    expect(stripNotebookLink(out)).toBe(sql);
+  });
+})

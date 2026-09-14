@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 — preview
+
+- **Fix: non-Python notebooks** (Spark SQL / Scala / R). *Save Notebook to
+  Project* and *Sync → Pull* failed with "no .py part in the response" — Fabric
+  stores a SQL notebook as `notebook-content.sql`, not `.py`. Now the native
+  source is found by any language, saved with the right extension, and linked
+  with the matching comment marker (`--` for SQL, `#` otherwise); *Update
+  Notebook in Fabric* accepts `.py/.sql/.scala/.r`.
+
+
 ## 0.4.0 — preview
 
 Milestone: a complete Fabric debug + git + deploy environment (rolling out in

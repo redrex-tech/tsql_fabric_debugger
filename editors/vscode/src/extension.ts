@@ -20,6 +20,7 @@ import {
   stampNotebookLink,
   readNotebookLink,
   stripNotebookLink,
+  commentPrefixFor,
   parseGitRemote,
   prApiEndpoint,
   prWebUrl,
@@ -867,14 +868,22 @@ async function saveNotebookToProject(item?: NotebookNode): Promise<void> {
       },
       async () => {
         const token = await getToken();
-        const py = await getNotebookSource(token, nb.workspaceId, nb.id);
-        const stamped = stampNotebookLink(py, {
-          workspaceId: nb.workspaceId,
-          itemId: nb.id,
-          displayName: nb.displayName,
-        });
+        const { content, ext } = await getNotebookSource(
+          token,
+          nb.workspaceId,
+          nb.id,
+        );
+        const stamped = stampNotebookLink(
+          content,
+          {
+            workspaceId: nb.workspaceId,
+            itemId: nb.id,
+            displayName: nb.displayName,
+          },
+          commentPrefixFor(ext),
+        );
         const safe = nb.displayName.replace(/[^\w.\- ]+/g, "_");
-        const target = vscode.Uri.joinPath(dir, "notebooks", `${safe}.py`);
+        const target = vscode.Uri.joinPath(dir, "notebooks", `${safe}.${ext}`);
         await vscode.workspace.fs.createDirectory(
           vscode.Uri.joinPath(target, ".."),
         );
@@ -906,9 +915,9 @@ async function updateNotebookInFabric(
     arg instanceof vscode.Uri
       ? arg
       : (arg?.resourceUri ?? vscode.window.activeTextEditor?.document.uri);
-  if (!uri || !uri.fsPath.toLowerCase().endsWith(".py")) {
+  if (!uri || !/\.(py|sql|scala|r)$/i.test(uri.fsPath)) {
     void vscode.window.showErrorMessage(
-      "T-SQL Fabric: select a local Fabric notebook source (.py) to update.",
+      "T-SQL Fabric: select a local Fabric notebook source (.py/.sql/.scala/.r) to update.",
     );
     return;
   }
@@ -1228,16 +1237,22 @@ async function syncWithFabric(
             (await findWorkspaceForServer(token, server));
           if (wsId) {
             for (const nb of await listNotebooks(token, wsId)) {
+              const { content, ext } = await getNotebookSource(
+                token,
+                nb.workspaceId,
+                nb.id,
+              );
               const py = stampNotebookLink(
-                await getNotebookSource(token, nb.workspaceId, nb.id),
+                content,
                 {
                   workspaceId: nb.workspaceId,
                   itemId: nb.id,
                   displayName: nb.displayName,
                 },
+                commentPrefixFor(ext),
               );
               const safe = nb.displayName.replace(/[^\w.\- ]+/g, "_");
-              const file = vscode.Uri.joinPath(dir, "notebooks", `${safe}.py`);
+              const file = vscode.Uri.joinPath(dir, "notebooks", `${safe}.${ext}`);
               await vscode.workspace.fs.createDirectory(
                 vscode.Uri.joinPath(file, ".."),
               );
@@ -1265,7 +1280,7 @@ async function syncWithFabric(
       exclude,
     );
     const nbFiles = await vscode.workspace.findFiles(
-      `${folder}/notebooks/**/*.py`,
+      `${folder}/notebooks/**/*.{py,sql,scala,r}`,
       exclude,
     );
     if (procFiles.length + nbFiles.length === 0) {
@@ -2045,7 +2060,7 @@ class ProjectFilesProvider implements vscode.TreeDataProvider<FileNode> {
       const kind: FileKind =
         element.label === "Procedures (.sql)"
           ? "sql"
-          : element.label === "Fabric notebooks (.py)"
+          : element.label === "Fabric notebooks (.py/.sql)"
             ? "fabricpy"
             : "notebook";
       return this.files(kind);
@@ -2054,7 +2069,7 @@ class ProjectFilesProvider implements vscode.TreeDataProvider<FileNode> {
     const labels: Record<FileKind, string> = {
       sql: "Procedures (.sql)",
       notebook: "Notebooks (.ipynb)",
-      fabricpy: "Fabric notebooks (.py)",
+      fabricpy: "Fabric notebooks (.py/.sql)",
     };
     for (const kind of ["sql", "notebook", "fabricpy"] as FileKind[]) {
       if ((await this.files(kind)).length > 0) {
@@ -2073,7 +2088,7 @@ class ProjectFilesProvider implements vscode.TreeDataProvider<FileNode> {
       kind === "sql"
         ? "**/*.sql"
         : kind === "fabricpy"
-          ? `${localFolder}/notebooks/**/*.py`
+          ? `${localFolder}/notebooks/**/*.{py,sql,scala,r}`
           : "**/*.ipynb";
     const uris = await vscode.workspace.findFiles(
       glob,

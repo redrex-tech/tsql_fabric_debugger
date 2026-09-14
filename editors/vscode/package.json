@@ -2,7 +2,7 @@
   "name": "tsql-fabric-debugger-vscode",
   "displayName": "T-SQL Fabric Debugger",
   "description": "Debug T-SQL (Transact-SQL) stored procedures on the Microsoft Fabric Warehouse: breakpoints, step over/into/out, watch variables and a result-set grid — with ROLLBACK. Pull, edit and deploy procedures and notebooks.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "redrex-tech",
   "license": "MIT",
   "repository": {
