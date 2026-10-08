@@ -52,7 +52,7 @@ jobs:
       - name: Package (.vsix)
         run: npx --yes @vscode/vsce package --no-dependencies -o extension.vsix
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: vsix
           path: editors/vscode/extension.vsix
